@@ -4,6 +4,8 @@ local M = {}
 -- If Yazi asks for a skip larger than this, jump straight to the last page.
 local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
+-- Maximum time allowed for preview (in ms)
+local TIME_OUT_PREVIEW = 3000
 
 ----------------------------------------------------------------------
 -- Utils
@@ -148,21 +150,6 @@ local function cache_is_fresh(job, cache_path)
   return c and c.mtime and s and s.mtime and c.mtime >= s.mtime
 end
 
--- Wait until cache exists AND is fresh; timeout after `timeout_ms`.
--- Returns true if ready, false if timed out.
-local function wait_for_fresh_cache(job, cache_path, timeout_ms)
-  local deadline = os.clock() + (timeout_ms / 1000)
-
-  while os.clock() < deadline do
-    if cache_is_fresh(job, cache_path) then
-      return true
-    end
-    ya.sleep(0.01) -- 10ms
-  end
-
-  return false
-end
-
 -- Derive cache path from file_cache base + current w/h
 local function get_cache_path(job)
   local base = ya.file_cache({ file = job.file, skip = 0 })
@@ -178,6 +165,48 @@ end
 
 local function sleep_ms(ms)
   ya.sleep(ms / 1000)
+end
+
+local function lock_is_held(cache_path)
+  local lock = lock_path_for(cache_path)
+  return fs.cha(lock) ~= nil
+end
+
+-- Returns true if we can parse the header line (first line) into a number.
+-- This is a good "file is fully written" signal.
+local function cache_header_ok(cache_path)
+  local out = Command("sed")
+    :arg({ "-n", "1p", tostring(cache_path) })
+    :stdout(Command.PIPED)
+    :stderr(Command.PIPED)
+    :stdin(Command.NULL)
+    :output()
+
+  if not out or not out.status.success then
+    return false
+  end
+
+  local n = tonumber((out.stdout or ""):match("(%d+)"))
+  return n ~= nil
+end
+
+-- Wait until cache is safe to read: fresh, unlocked, header readable.
+local function wait_for_ready_cache(job, cache_path, timeout_ms)
+  local deadline = os.clock() + (timeout_ms / 1000)
+
+  while os.clock() < deadline do
+    -- If writer is active, don't even try to read.
+    if lock_is_held(cache_path) then
+      ya.sleep(0.02) -- 20ms when locked
+    else
+      if cache_is_fresh(job, cache_path) and cache_header_ok(cache_path) then
+        return true
+      end
+      ya.sleep(0.01) -- 10ms otherwise
+    end
+  end
+
+  return false
 end
 
 -- Try to acquire lock by creating a directory (atomic).
@@ -304,7 +333,7 @@ local function ensure_cache(job, force_cache)
 
 	-- Acquire lock
   local lock_path = lock_path_for(cache_path)
-  local ok = acquire_lock(lock_path, 1000)  -- 1000ms is usually plenty
+  local ok = acquire_lock(lock_path, TIME_OUT_PREVIEW)
   if not ok then
     -- If still stale and lock didn't clear:
     return nil, "locked-timeout"
@@ -480,7 +509,7 @@ function M:peek(job)
   -- If not ready, wait up to 3s for preloader to produce fresh cache
   if not cache_is_fresh(job, cache_path) then
   	ya.dbg({job=job.args,file=tostring(job.file.url),caller="Cache not fresh"})
-    local ok = wait_for_fresh_cache(job, cache_path, 3000)
+    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
     ya.dbg({job=job.args,file=tostring(job.file.url),caller="Finished waiting"})
     if not ok then
       ya.preview_widget(job, ui.Text.parse("piper: preload timed out (cache not produced)"):area(job.area))
