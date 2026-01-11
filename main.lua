@@ -204,7 +204,7 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
       ya.sleep(0.02) -- 20ms when locked
     else
       if cache_is_fresh(job, cache_path) then
-          return true
+        return true
       end
       ya.sleep(0.01) -- 10ms otherwise
     end
@@ -579,7 +579,7 @@ function M:seek(job)
 end
 
 function M:peek(job)
-  local cache_path, why
+  local cache_path, why, hdr, herr
   if is_true(job.args.rely_on_preloader) then
     cache_path, why = get_cache_path(job)
     if not cache_path then
@@ -587,7 +587,8 @@ function M:peek(job)
       return
     end
 
-    if not cache_is_fresh(job, cache_path) then
+    local ok, hdr = cache_is_fresh(job, cache_path)
+    if not ok then
       -- If the cache file exists, we can self-heal (resize case) by reusing cmd from header.
       if fs.cha(cache_path) then
         local ensured, ewhy = ensure_cache(job)
@@ -633,7 +634,10 @@ function M:peek(job)
   --  - clamp skip by emitting a corrected peek (DON'T mutate job.skip)
   --------------------------------------------------------------------
 
-  local hdr, herr = read_cache_header(cache_path)
+  -- If hdr was not obtained yet
+  if not hdr then
+    hdr, herr = read_cache_header(cache_path)
+  end
   if hdr then
     local total = hdr.nline
     local limit = job.area.h
