@@ -204,11 +204,13 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
     if lock_is_held(cache_path) then
       ya.sleep(0.02) -- 20ms when locked
     else
-      local ok, hdr = cache_is_fresh(job, cache_path)
-      if ok then
-        return true, hdr
+      if not fs.cha(cache_path) then
+        ya.sleep(0.01)
+      else
+        local ok, hdr = cache_is_fresh(job, cache_path)
+        if ok then return true, hdr end
+        ya.sleep(0.01)
       end
-      ya.sleep(0.01) -- 10ms otherwise
     end
   end
   return false, nil
