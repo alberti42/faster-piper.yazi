@@ -6,6 +6,8 @@ local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
 -- Maximum time allowed for preview (in ms)
 local TIME_OUT_PREVIEW = 2000
+-- Maximum time for locking mechanism to avoid racing condition
+local LOCK_TTL_SEC = 60
 
 ----------------------------------------------------------------------
 -- Cache header layout (1-based line numbers)
@@ -184,38 +186,6 @@ function M.format(job, lines)
   return ui.Text(lines):area(job.area)
 end
 
--- Remove all cached variants for a file (all w/h), plus tmp + lock.
-local function purge_all_cache_variants(file)
-
-  -- local base = ya.file_cache({ file = file, skip = 0 })
-  -- if not base then
-  --   return false, "caching-disabled-by-yazi"
-  -- end
-
-  -- local prefix = tostring(base) .. "_w*_h*"
-  -- local cmd = string.format([[
-  --   rm -f %s %s.tmp 2>/dev/null || true
-  --   rm -rf %s.lock 2>/dev/null || true
-  -- ]],
-  --   ya.quote(prefix),
-  --   ya.quote(prefix),
-  --   ya.quote(prefix)
-  -- )
-
-  -- local out, err = Command("sh")
-  --   :arg({ "-c", cmd })
-  --   :stdin(Command.NULL)
-  --   :stdout(Command.NULL)
-  --   :stderr(Command.PIPED)
-  --   :output()
-
-  -- if not out then
-  --   return false, err
-  -- end
-  -- -- rm returns 0 even if nothing matched (because of `|| true`), so just treat as ok.
-  return true
-end
-
 -- NOTE: This freshness check only compares cache mtime vs source mtime.
 -- Cache filename also includes w/h, so resizing naturally changes cache key.
 local function cache_is_fresh(job, cache_path)
@@ -295,30 +265,45 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
 end
 
 
+local function lock_age_seconds(lock_path)
+  local c = fs.cha(lock_path)
+  if not (c and c.mtime) then
+    return math.huge
+  end
+  return ya.time() - c.mtime
+end
+
+local function break_lock_dir(lock_path)
+  -- best-effort; ignore failures
+  fs.remove("dir_all", lock_path)
+end
+
 -- Try to acquire lock by creating a directory (atomic on POSIX filesystems).
 -- Returns true if acquired, false if timed out.
 local function acquire_lock(lock_path, timeout_ms)
   timeout_ms = timeout_ms or 500
-  local start = os.clock()
+  local deadline = ya.time() + (timeout_ms / 1000)
 
-  while true do
-    local ok, err = fs.create("dir", lock_path)  -- or "dir_all"
+  while ya.time() < deadline do
+    local ok = fs.create("dir", lock_path)
     if ok then
       return true
     end
 
-    -- If it already exists, someone else holds the lock -> wait & retry.
-    -- (We don't need to pattern-match err; any failure here is treated as "not acquired".)
-    if (os.clock() - start) * 1000 > timeout_ms then
-      return false
+    -- If it exists and is stale, break it and retry immediately
+    if lock_age_seconds(lock_path) > LOCK_TTL_SEC then
+      ya.dbg({ stale_lock = tostring(lock_path), age = lock_age_seconds(lock_path) })
+      break_lock_dir(lock_path)
+    else
+      ya.sleep(0.01)
     end
-
-    ya.sleep(0.01)
   end
+
+  return false
 end
 
 local function release_lock(lock_path)
-  fs.remove("dir", lock_path) -- best-effort
+  fs.remove("dir_all", lock_path)
 end
 
 ----------------------------------------------------------------------
@@ -527,17 +512,17 @@ local function ensure_cache(job)
     return nil, why
   end
 
-  ya.dbg("ENSURE_CACHE")
+  -- ya.dbg("ENSURE_CACHE")
   -- If fresh -> done
   if cache_is_fresh(job, cache_path) then
     return cache_path
   end
-  ya.dbg("NO VALID CACHE")
+  -- ya.dbg("NO VALID CACHE")
 
   -- Acquire lock
   local lock_path = lock_path_for(cache_path)
   local ok = acquire_lock(lock_path, TIME_OUT_PREVIEW)
-  ya.dbg("LOCK ACQUIRED")
+  -- ya.dbg("LOCK ACQUIRED")
   if not ok then
     return nil, "locked-timeout"
   end
@@ -677,17 +662,21 @@ function M:peek(job)
     end
 
     if not cache_is_fresh(job, cache_path) then
-      -- Force generation of cache -- locking mechanism prevent racing conditions
-      ya.dbg("FORCING")
-      cache_path, why = ensure_cache(job)
-      -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
-      -- local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-      if not ok then
-        ya.preview_widget(
-          job,
-          ui.Text.parse("faster-piper: ⏳ preview is taking longer than expected. Try selecting the file again."):area(job.area)
-        )
-        return
+
+      local ensured, ewhy = ensure_cache(job)
+
+      -- Only replace cache_path if ensure_cache actually succeeded
+      if ensured then
+        cache_path = ensured
+      else
+        -- ensure_cache failed in preloader mode; will wait for preloader
+        local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
+        if not ok then
+          ya.preview_widget(job,
+            ui.Text.parse("faster-piper: ⏳ preview is taking longer than expected. Try selecting the file again."):area(job.area)
+          )
+          return
+        end
       end
     end
   else
