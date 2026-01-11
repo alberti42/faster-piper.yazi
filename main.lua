@@ -292,7 +292,7 @@ local function acquire_lock(lock_path, timeout_ms)
 
     -- If it exists and is stale, break it and retry immediately
     if lock_age_seconds(lock_path) > LOCK_TTL_SEC then
-      ya.dbg({ stale_lock = tostring(lock_path), age = lock_age_seconds(lock_path) })
+      -- ya.dbg({ stale_lock = tostring(lock_path), age = lock_age_seconds(lock_path) })
       break_lock_dir(lock_path)
     else
       ya.sleep(0.01)
@@ -396,21 +396,13 @@ local function generate_cache(job, cache_path)
   -- 1) Decide template: job.args[1] or cached header
   local tpl = job.args and job.args[1]
   if tpl == "" then tpl = nil end
-  
-  ya.dbg("GENERATING")
-  ya.dbg({cache=tostring(cache_path)})
 
   if not tpl then
-    ya.dbg("NOT TPL")
     local cha = fs.cha(cache_path)
-    ya.dbg({cha=cha})
     if cha then
-      ya.dbg("READING CACHE HEADER")
       local hdr, herr = read_cache_header(cache_path)
-      ya.dbg("READ CACHE HEADER")
       if hdr and hdr.cmd and hdr.cmd ~= "" then
         tpl = hdr.cmd
-        ya.dbg({tpl=tpl})
       else
         -- header invalid -> cannot recover recipe
         ya.err("faster-piper: cache header invalid; cannot reuse recipe: " .. tostring(herr))
@@ -422,8 +414,6 @@ local function generate_cache(job, cache_path)
     ya.err("faster-piper: missing generator command template (job.args[1]) and no usable cached header")
     return false
   end
-
-  ya.dbg({tpl=tpl})
 
   -- Guard: template must be single-line for env passing + header layout
   if tpl:find("\n", 1, true) then
@@ -458,8 +448,6 @@ local function generate_cache(job, cache_path)
     quoted_path
   )
 
-  ya.dbg({cmd=cmd})
-
   local child, err = Command("sh")
     :arg({ "-c", cmd })
     :env("w", tostring(job.area.w))
@@ -491,15 +479,14 @@ local function generate_cache(job, cache_path)
     fs.remove("file", tmp_url)
     return false
   end
-  ya.dbg("READING CACHE HEADER")
-  -- 4) Sanity-check the newly written header (optional but useful)
+  
+  -- 4) Sanity-check the newly written header
   local hdr, herr = read_cache_header(cache_path)
   if not hdr then
     ya.err("faster-piper: wrote cache but header sanity-check failed: " .. tostring(herr))
     fs.remove("file", cache_path)
     return false
   end
-  ya.dbg("DONE")
   return true
 end
 
@@ -512,17 +499,15 @@ local function ensure_cache(job)
     return nil, why
   end
 
-  -- ya.dbg("ENSURE_CACHE")
   -- If fresh -> done
   if cache_is_fresh(job, cache_path) then
     return cache_path
   end
-  -- ya.dbg("NO VALID CACHE")
-
+  
   -- Acquire lock
   local lock_path = lock_path_for(cache_path)
   local ok = acquire_lock(lock_path, TIME_OUT_PREVIEW)
-  -- ya.dbg("LOCK ACQUIRED")
+  
   if not ok then
     return nil, "locked-timeout"
   end
