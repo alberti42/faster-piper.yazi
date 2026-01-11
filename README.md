@@ -50,7 +50,7 @@ The command’s stdout becomes the preview content.
 ```toml
 [[plugin.prepend_previewers]]
 url = "*.md"
-run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dark "$1"'
+run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"'
 ```
 
 #### Example: Preview tarballs with `tar`
@@ -60,6 +60,51 @@ run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dark "$1"'
 url = "*.tar*"
 run = 'faster-piper --format=url -- tar tf "$1"'
 ```
+
+### Preloading for instant previews
+
+`faster-piper` works **without** preloading: the first `peek` will generate the
+cache on demand.
+
+However, if you want previews to appear *instantaneously* when you move the
+cursor (i.e. the cache is already warm by the time `peek` runs), you should
+configure the same rules under **both**:
+
+- `plugin.prepend_previewers`
+- `plugin.prepend_preloaders`
+
+In practice this means: **duplicate the same `run = 'faster-piper …'` entries**
+in both sections.
+
+Example:
+
+```toml
+[plugin]
+prepend_previewers = [
+  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+]
+
+prepend_preloaders = [
+  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+]
+```
+
+#### Why duplication is necessary
+
+Yazi chooses previewers and preloaders independently. A preloader cannot “reuse”
+a previewer rule automatically, so the only way to ensure the cache is produced
+ahead of time is to provide the same matcher + command in both places.
+
+#### Race safety (preloader vs. peek)
+
+`faster-piper` handles the race between preloading and previewing gracefully:
+
+- If both `preload` and `peek` arrive around the same time, **the generator is
+  not run twice**.
+- Which one “wins” (preloader or peek) can fluctuate depending on timing, but
+  the outcome is the same: you get a valid cache and a correct preview.
 
 ### Fast scrolling and “jump to top/bottom”
 
