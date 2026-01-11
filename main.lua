@@ -65,9 +65,68 @@ local function is_true(v)
 end
 
 ----------------------------------------------------------------------
--- Read header line: total number of lines in CONTENT (excluding header).
--- Uses `sed` (portable GNU/BSD).
+-- Read and validate a full header in ONE call.
+-- Returns:
+--   hdr = { cmd = <string>, nline = <number>, w = <number> }  on success
+--   nil, err                                                  on failure
+--
+-- Notes:
+-- - cmd is returned without trailing newline.
+-- - nline and w are parsed as integers.
 ----------------------------------------------------------------------
+local function read_cache_header(cache_path)
+  -- Read the first HEADER.N lines at once
+  local spec = string.format("1,%dp", HEADER.N)
+
+  local out, err = Command("sed")
+    :arg({ "-n", spec, tostring(cache_path) })
+    :stdout(Command.PIPED)
+    :stderr(Command.PIPED)
+    :stdin(Command.NULL)
+    :output()
+
+  if not out then
+    return nil, err
+  end
+  if not out.status.success then
+    return nil, out.stderr
+  end
+
+  local txt = out.stdout or ""
+  if txt == "" then
+    return nil, "empty cache header"
+  end
+
+  -- Split into lines (WITHOUT losing empty cmd lines)
+  -- Keep at most HEADER.N lines.
+  local lines = {}
+  local i = 0
+  for line in txt:gmatch("([^\n]*)\n") do
+    i = i + 1
+    lines[i] = line
+    if i >= HEADER.N then break end
+  end
+
+  if #lines < HEADER.N then
+    return nil, "incomplete cache header (need " .. HEADER.N .. " lines, got " .. #lines .. ")"
+  end
+
+  local cmd = lines[HEADER.LINE_CMD]
+  local nline = tonumber((lines[HEADER.LINE_NLINE] or ""):match("^%s*(%d+)%s*$"))
+  local w = tonumber((lines[HEADER.LINE_W] or ""):match("^%s*(%d+)%s*$"))
+
+  if cmd == nil then
+    return nil, "missing cmd header line"
+  end
+  if not nline then
+    return nil, "invalid line-count header: " .. tostring(lines[HEADER.LINE_NLINE])
+  end
+  if not w then
+    return nil, "invalid width header: " .. tostring(lines[HEADER.LINE_W])
+  end
+
+  return { cmd = cmd, nline = nline, w = w }, nil
+end
 
 local function read_total_lines(cache_path)
   local spec = string.format("%dp", HEADER.LINE_NLINE)
@@ -214,7 +273,8 @@ local function get_cache_path(job)
 end
 
 local function lock_path_for(cache_path)
-  return Url(tostring(cache_path) .. ".lock")
+  local id = ya.id and tostring(ya.id()) or "noid"
+  return Url(string.format("%s.lock.%s", tostring(cache_path), id))
 end
 
 local function sleep_ms(ms)
@@ -254,7 +314,10 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
       ya.sleep(0.02) -- 20ms when locked
     else
       if cache_is_fresh(job, cache_path) then
-        return true
+        local hdr = read_cache_header(cache_path)
+        if hdr and hdr.w == job.area.w and hdr.nline then
+          return true
+        end
       end
       ya.sleep(0.01) -- 10ms otherwise
     end
@@ -308,77 +371,6 @@ end
 
 ----------------------------------------------------------------------
 -- Cache generation
--- Writes generator output to cache_path, then computes line count and prepends it.
--- Header line: total number of CONTENT lines (excluding header itself).
-----------------------------------------------------------------------
-
-----------------------------------------------------------------------
--- Read and validate a full header in ONE call.
--- Returns:
---   hdr = { cmd = <string>, nline = <number>, w = <number> }  on success
---   nil, err                                                  on failure
---
--- Notes:
--- - cmd is returned without trailing newline.
--- - nline and w are parsed as integers.
-----------------------------------------------------------------------
-local function read_cache_header(cache_path)
-  -- Read the first HEADER.N lines at once
-  local spec = string.format("1,%dp", HEADER.N)
-
-  local out, err = Command("sed")
-    :arg({ "-n", spec, tostring(cache_path) })
-    :stdout(Command.PIPED)
-    :stderr(Command.PIPED)
-    :stdin(Command.NULL)
-    :output()
-
-  if not out then
-    return nil, err
-  end
-  if not out.status.success then
-    return nil, out.stderr
-  end
-
-  local txt = out.stdout or ""
-  if txt == "" then
-    return nil, "empty cache header"
-  end
-
-  -- Split into lines (WITHOUT losing empty cmd lines)
-  -- Keep at most HEADER.N lines.
-  local lines = {}
-  local i = 0
-  for line in txt:gmatch("([^\n]*)\n") do
-    i = i + 1
-    lines[i] = line
-    if i >= HEADER.N then break end
-  end
-
-  if #lines < HEADER.N then
-    return nil, "incomplete cache header (need " .. HEADER.N .. " lines, got " .. #lines .. ")"
-  end
-
-  local cmd = lines[HEADER.LINE_CMD]
-  local nline = tonumber((lines[HEADER.LINE_NLINE] or ""):match("^%s*(%d+)%s*$"))
-  local w = tonumber((lines[HEADER.LINE_W] or ""):match("^%s*(%d+)%s*$"))
-
-  if cmd == nil then
-    return nil, "missing cmd header line"
-  end
-  if not nline then
-    return nil, "invalid line-count header: " .. tostring(lines[HEADER.LINE_NLINE])
-  end
-  if not w then
-    return nil, "invalid width header: " .. tostring(lines[HEADER.LINE_W])
-  end
-
-  return { cmd = cmd, nline = nline, w = w }, nil
-end
-
-
-----------------------------------------------------------------------
--- Cache generation (rewritten)
 --
 -- Behavior:
 -- - If job.args[1] is present: use it as recipe.
