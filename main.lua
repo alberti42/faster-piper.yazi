@@ -54,15 +54,50 @@ end
 --   }
 -- end)
 
-local function is_true(v)
-  if v == nil then return true end  -- default true
-  if v == true then return true end
-  if type(v) == "number" then return v ~= 0 end
+--- Parse a "truthy/falsey" value into a boolean, with an explicit default.
+---
+--- This is meant for plugin args / config values that might arrive as:
+---   - nil           -> returns `default`
+---   - boolean       -> returns that boolean
+---   - number        -> 0 = false, non-zero = true
+---   - string        -> common on/off values (case-insensitive):
+---                      true:  "true", "1", "yes", "on"
+---                      false: "false", "0", "no",  "off"
+---                      anything else -> returns `default`
+---   - other types   -> returns `default`
+---
+--- param v any            ->  Value to parse.
+--- param default boolean  ->  The fallback value used when `v` is nil/unknown.
+--- return boolean
+local function is_true(v, default)
+  assert(type(default) == "boolean", "is_true: default must be a boolean")
+
+  if v == nil then
+    return default
+  end
+  if v == true then
+    return true
+  end
+  if v == false then
+    return false
+  end
+  if type(v) == "number" then
+    return v ~= 0
+  end
   if type(v) == "string" then
     v = v:lower()
-    return v == "true" or v == "1" or v == "yes" or v == "on"
+    if v == "true" or v == "1" or v == "yes" or v == "on" then
+      return true
+    end
+    if v == "false" or v == "0" or v == "no" or v == "off" then
+      return false
+    end
+    -- Unknown string: fall back to default (or you can choose to return true)
+    return default
   end
-  return true
+
+  -- Unknown type: fall back to default
+  return default
 end
 
 ----------------------------------------------------------------------
@@ -586,7 +621,7 @@ function M:peek(job)
   local cache_path, why
   local hdr, herr
 
-  if is_true(job.args.rely_on_preloader) then
+  if is_true(job.args.rely_on_preloader,false) then
     cache_path, why = get_cache_path(job)
     if not cache_path then
       ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
@@ -626,11 +661,6 @@ function M:peek(job)
       ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
       return
     end
-  end
-
-  if not cache_path then
-    ya.preview_widget(job, ui.Text.parse("faster-piper: failed to generate preview"):area(job.area))
-    return
   end
 
   -- If hdr not already available/reliable, read it once here

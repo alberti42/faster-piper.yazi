@@ -66,17 +66,15 @@ run = 'faster-piper --format=url -- tar tf "$1"'
 `faster-piper` works **without** preloading: the first `peek` will generate the
 cache on demand.
 
-However, if you want previews to appear *instantaneously* when you move the
-cursor (i.e. the cache is already warm by the time `peek` runs), you should
-configure the same rules under **both**:
+If you want previews to appear *instantaneously* when you move the cursor (i.e.
+the cache is already warm by the time `peek` runs), configure a matching rule
+under `plugin.prepend_preloaders`.
 
-- `plugin.prepend_previewers`
-- `plugin.prepend_preloaders`
+There are two supported ways to do this:
 
-In practice this means: **duplicate the same `run = 'faster-piper …'` entries**
-in both sections.
+#### Option A (classic): duplicate the same command in previewers + preloaders
 
-Example:
+This mirrors `piper.yazi` usage and is always valid.
 
 ```toml
 [plugin]
@@ -91,11 +89,47 @@ prepend_preloaders = [
 ]
 ```
 
-#### Why duplication is necessary
+**Important:** the command templates must be identical. Yazi may race `preload`
+and `peek`, and whichever runs first might win. If the commands differ, the cache
+content becomes ambiguous.
 
-Yazi chooses previewers and preloaders independently. A preloader cannot “reuse”
-a previewer rule automatically, so the only way to ensure the cache is produced
-ahead of time is to provide the same matcher + command in both places.
+#### Option B (recommended): define the command only in the preloader with `--rely-on-preloader`
+
+If you don’t want to duplicate the piping command in both places, you can make
+the previewer rule “rely on the preloader”:
+
+- The **preloader** is responsible for generating the cache (and therefore must
+  include the command after `--`).
+- The **previewer** becomes a lightweight reader: it only displays the cache and
+  (in edge cases such as terminal resize) may self-heal using the cached recipe.
+
+Example:
+
+```toml
+[plugin]
+prepend_previewers = [
+  { url = "*.md",   run = 'faster-piper --rely-on-preloader' },
+  { url = "*.tar*", run = 'faster-piper --rely-on-preloader --format=url' },
+]
+
+prepend_preloaders = [
+  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+]
+```
+
+This mode is the most responsive approach because `peek` avoids re-running the
+generator when the preloader is expected to have done the work.
+
+##### Notes on `--rely-on-preloader`
+
+- `--rely-on-preloader` **does not require** that you use preloaders. If you
+  don’t configure a preloader rule, use normal mode (no flag) and `peek` will
+  generate the cache on demand.
+- When you *do* use preloaders, `--rely-on-preloader` is the simplest way to
+  avoid keeping two command strings in sync.
+- If you do choose Option A (duplicating commands), keep them identical; mixing
+  different commands for the same matcher is undefined because of races.
 
 #### Race safety (preloader vs. peek)
 
