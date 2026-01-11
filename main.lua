@@ -5,7 +5,7 @@ local M = {}
 local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
 -- Maximum time allowed for preview (in ms)
-local TIME_OUT_PREVIEW = 100
+local TIME_OUT_PREVIEW = 1000
 
 ----------------------------------------------------------------------
 -- Cache header layout (1-based line numbers)
@@ -216,7 +216,6 @@ end
 local function cache_is_fresh(job, cache_path)
   local c = fs.cha(cache_path)
   local s = job.file.cha
-  ya.dbg({c=c,cmtime=c.mtime,s=s,smtime=s.smtime})
   return c and c.mtime and s and s.mtime and c.mtime >= s.mtime
 end
 
@@ -321,9 +320,6 @@ local function generate_cache(job, cache_path)
     return false
   end
 
-  ya.dbg("GENERATING CACHE")
-  ya.dbg({job=job,file=tostring(job.file.url),caller="generate_cache"})
-
   -- expanded command used to generate content (same as before)
   local final = tpl:gsub('"$1"', ya.quote(source_path))
 
@@ -394,8 +390,6 @@ local function ensure_cache(job)
   end
 
   -- If not forced and fresh -> done
-  ya.dbg("ENSURE CACHE")
-  ya.dbg({job=job,file=tostring(job.file.url),caller="ensure_cache"})
   if cache_is_fresh(job, cache_path) then
     return cache_path
   end
@@ -563,11 +557,8 @@ function M:seek(job)
 end
 
 function M:peek(job)
-	-- ya.dbg({job=job})
-  local cache_path, why
-  -- ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
+	local cache_path, why
   if is_true(job.args.rely_on_preloader) then
-    -- ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
     cache_path, why = get_cache_path(job)
     if not cache_path then
       ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
@@ -576,16 +567,16 @@ function M:peek(job)
 
     if not cache_is_fresh(job, cache_path) then
 	    -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
-	    -- ya.dbg("STARTED WAITING")
 	    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-	    -- ya.dbg("FINISHED WAITING")
-	    -- ya.dbg({job=job.args,cache_path=tostring(cache_path),file=tostring(job.file.url),caller="Finished waiting"})
 	    if not ok then
-	      ya.preview_widget(job, ui.Text.parse("faster-piper: preload timed out (cache not produced)"):area(job.area))
+	      ya.preview_widget(
+	        job,
+	        ui.Text.parse("faster-piper: ⏳ preview is taking longer than expected. Try selecting the file again."):area(job.area)
+	      )
 	      return
 	    end
+
 	    local new_cache_path, why = get_cache_path(job)
-	    -- ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
 	  end
   else
     cache_path, why = ensure_cache(job, false)
