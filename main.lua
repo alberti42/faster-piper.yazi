@@ -500,12 +500,11 @@ function M:seek(job)
 end
 
 function M:peek(job)
+	local cache_path, why
 	ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
-	
 	if is_true(job.args.rely_on_preloader) then
 		ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
-		-- local cache_path, why = ensure_cache(job, false)
-		local cache_path, why = get_cache_path(job)
+		cache_path, why = get_cache_path(job)
 	  if not cache_path then
 	    ya.preview_widget(job, ui.Text.parse("piper: " .. tostring(why)):area(job.area))
 	    return
@@ -525,8 +524,7 @@ function M:peek(job)
 	    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
 	  end
 	else
-		ya.dbg({job=job.args,file=tostring(job.file.url),caller="PEEK GENERATES CACHE"})
-		local cache_path, why = ensure_cache(job, false)
+		cache_path, why = ensure_cache(job, false)		
 	end
 
   --------------------------------------------------------------------
