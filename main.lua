@@ -501,27 +501,21 @@ end
 
 function M:peek(job)
 	local cache_path, why
-	ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
 	if is_true(job.args.rely_on_preloader) then
-		ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
 		cache_path, why = get_cache_path(job)
 	  if not cache_path then
 	    ya.preview_widget(job, ui.Text.parse("piper: " .. tostring(why)):area(job.area))
 	    return
 	  end
-	  ya.dbg({job=job.args,file=tostring(job.file.url),caller="Good cache path"})
-
+	
 	  -- If not ready, wait up to 3s for preloader to produce fresh cache
 	  if not cache_is_fresh(job, cache_path) then
-	  	ya.dbg({job=job.args,file=tostring(job.file.url),caller="Cache not fresh"})
 	    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-	    ya.dbg({job=job.args,file=tostring(job.file.url),caller="Finished waiting"})
 	    if not ok then
 	      ya.preview_widget(job, ui.Text.parse("piper: preload timed out (cache not produced)"):area(job.area))
 	      return
 	    end
 	    local new_cache_path, why = get_cache_path(job)
-	    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
 	  end
 	else
 		cache_path, why = ensure_cache(job, false)		
