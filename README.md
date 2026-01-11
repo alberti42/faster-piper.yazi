@@ -8,7 +8,7 @@ and efficient scrolling for large outputs.
 
 ## Motivation
 
-The original [`piper.yazi`](https://github.com/yazi-rs/plugins/tree/main/piper)
+The original [`piper.yazi`](https://github.com/yazi-rs/plugins/tree/main/piper.yazi)
 is a simple and elegant previewer that executes a shell command on each preview.
 
 `faster-piper` started as an experiment to explore whether:
