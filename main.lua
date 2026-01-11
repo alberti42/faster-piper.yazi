@@ -5,7 +5,7 @@ local M = {}
 local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
 -- Maximum time allowed for preview (in ms)
-local TIME_OUT_PREVIEW = 3000
+local TIME_OUT_PREVIEW = 500
 
 ----------------------------------------------------------------------
 -- Utils
@@ -203,9 +203,14 @@ end
 
 -- Wait until cache is safe to read: fresh, unlocked, header readable.
 local function wait_for_ready_cache(job, cache_path, timeout_ms)
-  local deadline = os.clock() + (timeout_ms / 1000)
+  local deadline = ya.time() + (timeout_ms / 1000)
+  local idx = 0
+	ya.dbg("START")
+  ya.dbg({timeout=timeout_ms})
+  while ya.time() < deadline do
+    ya.dbg("CYCLE " .. tostring(idx))
+    ya.dbg({time=ya.time(),deadline=deadline})
 
-  while os.clock() < deadline do
     -- If writer is active, don't even try to read.
     if lock_is_held(cache_path) then
       ya.sleep(0.02) -- 20ms when locked
@@ -215,10 +220,14 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
       end
       ya.sleep(0.01) -- 10ms otherwise
     end
+
+    idx = idx + 1
   end
 
+  ya.dbg("FINISHED")
   return false
 end
+
 
 -- Try to acquire lock by creating a directory (atomic on POSIX filesystems).
 -- Returns true if acquired, false if timed out.
@@ -501,22 +510,27 @@ end
 
 function M:peek(job)
 	local cache_path, why
+	ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
 	if is_true(job.args.rely_on_preloader) then
+		ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
 		cache_path, why = get_cache_path(job)
 	  if not cache_path then
 	    ya.preview_widget(job, ui.Text.parse("piper: " .. tostring(why)):area(job.area))
 	    return
 	  end
-	
-	  -- If not ready, wait up to 3s for preloader to produce fresh cache
-	  if not cache_is_fresh(job, cache_path) then
-	    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-	    if not ok then
-	      ya.preview_widget(job, ui.Text.parse("piper: preload timed out (cache not produced)"):area(job.area))
-	      return
-	    end
-	    local new_cache_path, why = get_cache_path(job)
-	  end
+
+	  -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
+	  ya.dbg("STARTED WAITING")
+  	local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
+  	ya.dbg("FINISHED WAITING")
+    ya.dbg({job=job.args,file=tostring(job.file.url),caller="Finished waiting"})
+    if not ok then
+      ya.preview_widget(job, ui.Text.parse("piper: preload timed out (cache not produced)"):area(job.area))
+      return
+    end
+    local new_cache_path, why = get_cache_path(job)
+    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
+  
 	else
 		cache_path, why = ensure_cache(job, false)		
 	end
@@ -529,7 +543,7 @@ function M:peek(job)
     return
   end
 
-    --------------------------------------------------------------------
+  --------------------------------------------------------------------
   -- Cached mode:
   --  - header line 1: total number of content lines
   --  - content begins at line 2
