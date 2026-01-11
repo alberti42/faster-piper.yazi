@@ -6,6 +6,12 @@ A fast, cache-aware reimplementation of `piper.yazi` for Yazi.
 arbitrary shell command into Yazi’s preview pane, with aggressive caching
 and efficient scrolling for large outputs.
 
+## Installation
+
+```sh
+ya pkg add alberti42/faster-piper
+```
+
 ## Motivation
 
 The original [`piper.yazi`](https://github.com/yazi-rs/plugins/tree/main/piper.yazi)
