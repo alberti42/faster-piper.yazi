@@ -5,7 +5,7 @@ local M = {}
 local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
 -- Maximum time allowed for preview (in ms)
-local TIME_OUT_PREVIEW = 1000
+local TIME_OUT_PREVIEW = 2000
 
 ----------------------------------------------------------------------
 -- Cache header layout (1-based line numbers)
@@ -49,47 +49,6 @@ local get_hovered = ya.sync(function()
     is_dir = h.cha and h.cha.is_dir or false,
   }
 end)
-
-----------------------------------------------------------------------
--- Lazy OS-specific query builder (cached within the SAME Lua state)
--- NOTE: This may be recomputed if Yazi reloads Lua between calls,
--- but that's fine because it's cheap and doesn't affect correctness.
-----------------------------------------------------------------------
-
-local function get_queries()
-  if M._queries ~= nil then
-    return M._queries, M._queries_err
-  end
-
-  local function build_queries()
-    local os = ya.target_os()
-
-    if os == "linux" then
-      return {
-        -- GNU sed: insert $L as new first line (no backup)
-        sed_prepend = function(file_q)
-          -- $L is a shell variable
-          return 'sed -i "1i$L" -- ' .. file_q
-        end,
-      }
-    elseif os == "macos" then
-      return {
-        -- GNU sed: insert $L as new first line (no backup)
-        sed_prepend = function(file_q)
-          -- $L is a shell variable
-          return 'gsed -i "1i$L" -- ' .. file_q
-        end,
-      }
-    else
-      return nil, "unsupported-os: " .. tostring(os)
-    end
-  end
-
-  local q, err = build_queries()
-  M._queries = q
-  M._queries_err = err
-  return M._queries, M._queries_err
-end
 
 local function is_true(v)
   if v == nil then return true end  -- default true
@@ -326,13 +285,14 @@ local function generate_cache(job, cache_path)
   local quoted_path = ya.quote(tostring(cache_path))
   local tmp_path    = ya.quote(tostring(cache_path) .. ".tmp")
 
+  ya.dbg({cache=tostring(cache_path)})
   -- content -> cache_path
   -- L = content line count
   -- write: raw tpl (exact), L, then content
   -- atomic replace
   local cmd = string.format([[
     (%s) > %s &&
-    L=$(wc -l < %s) &&
+    L=$(wc -l < %s | tr -d '[:space:]') &&
     { printf '%%s\n' "$FP_TPL"; printf '%%s\n' "$L"; cat %s; } > %s &&
     mv %s %s
   ]],
@@ -557,7 +517,7 @@ function M:seek(job)
 end
 
 function M:peek(job)
-	local cache_path, why
+  local cache_path, why
   if is_true(job.args.rely_on_preloader) then
     cache_path, why = get_cache_path(job)
     if not cache_path then
@@ -566,18 +526,18 @@ function M:peek(job)
     end
 
     if not cache_is_fresh(job, cache_path) then
-	    -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
-	    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-	    if not ok then
-	      ya.preview_widget(
-	        job,
-	        ui.Text.parse("faster-piper: ⏳ preview is taking longer than expected. Try selecting the file again."):area(job.area)
-	      )
-	      return
-	    end
+      -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
+      local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
+      if not ok then
+        ya.preview_widget(
+          job,
+          ui.Text.parse("faster-piper: ⏳ preview is taking longer than expected. Try selecting the file again."):area(job.area)
+        )
+        return
+      end
 
-	    local new_cache_path, why = get_cache_path(job)
-	  end
+      local new_cache_path, why = get_cache_path(job)
+    end
   else
     cache_path, why = ensure_cache(job, false)
   end
