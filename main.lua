@@ -148,6 +148,21 @@ local function cache_is_fresh(job, cache_path)
   return c and c.mtime and s and s.mtime and c.mtime >= s.mtime
 end
 
+-- Wait until cache exists AND is fresh; timeout after `timeout_ms`.
+-- Returns true if ready, false if timed out.
+local function wait_for_fresh_cache(job, cache_path, timeout_ms)
+  local deadline = os.clock() + (timeout_ms / 1000)
+
+  while os.clock() < deadline do
+    if cache_is_fresh(job, cache_path) then
+      return true
+    end
+    ya.sleep(0.01) -- 10ms
+  end
+
+  return false
+end
+
 -- Derive cache path from file_cache base + current w/h
 local function get_cache_path(job)
   local base = ya.file_cache({ file = job.file, skip = 0 })
@@ -453,8 +468,27 @@ function M:seek(job)
 end
 
 function M:peek(job)
-	ya.dbg({job=job,file=(sanitize_url(job.file.url))})
-	local cache_path, why = ensure_cache(job, false)
+	ya.dbg({job=job.args,file=tostring(job.file.url),caller="PEEK"})
+	-- local cache_path, why = ensure_cache(job, false)
+	local cache_path, why = get_cache_path(job)
+  if not cache_path then
+    ya.preview_widget(job, ui.Text.parse("piper: " .. tostring(why)):area(job.area))
+    return
+  end
+  ya.dbg({job=job.args,file=tostring(job.file.url),caller="Good cache path"})
+
+  -- If not ready, wait up to 3s for preloader to produce fresh cache
+  if not cache_is_fresh(job, cache_path) then
+  	ya.dbg({job=job.args,file=tostring(job.file.url),caller="Cache not fresh"})
+    local ok = wait_for_fresh_cache(job, cache_path, 3000)
+    ya.dbg({job=job.args,file=tostring(job.file.url),caller="Finished waiting"})
+    if not ok then
+      ya.preview_widget(job, ui.Text.parse("piper: preload timed out (cache not produced)"):area(job.area))
+      return
+    end
+    local new_cache_path, why = get_cache_path(job)
+    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
+  end
 
   --------------------------------------------------------------------
   -- If caching disabled => run generator directly (old behavior)
