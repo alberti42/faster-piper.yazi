@@ -30,7 +30,7 @@ local function get_queries()
         -- GNU sed: insert $L as new first line (no backup)
         sed_prepend = function(file_q)
           -- $L is a shell variable
-          return 'sed -i "1i$L" ' .. file_q
+          return 'sed -i "1i$L" -- ' .. file_q
         end,
       }
     elseif os == "macos" then
@@ -64,48 +64,35 @@ local function is_true(v)
 end
 
 ----------------------------------------------------------------------
--- sanitize_url(u) -> Url
+-- fs_path(url) -> string
 --
--- Yazi sometimes gives "virtual" URLs for items shown in special views,
--- e.g. search results:
---   search://dupli:1:1//Users/Username/foo.txt
+-- Convert Yazi Url into a real filesystem path string for external tools.
 --
--- External preview commands (bat, tar, glow, etc.) usually expect a real
--- filesystem path, not a virtual scheme. The key trick is that `Url.path`
--- is the "path portion" of the URL, i.e. it strips the scheme and yields
--- the real underlying path (e.g. "/Users/Username/foo.txt").
+-- Why:
+--   In some views (notably search results), Yazi uses virtual URLs such as:
+--     search://dupli:1:1//Users/andrea/file.txt
+--   External commands (bat, glow, tar, etc.) expect a plain filesystem path.
 --
--- This helper normalizes such virtual URLs into a usable file Url by
--- converting `u.path` back into a plain Url.
--- Defensive fallback: if `u.path` is empty for any reason, parse the
--- `//...` suffix from the string form.
+-- How:
+--   Yazi already exposes the underlying path via `url.path`, and also tells
+--   us whether this Url comes from search using `url.is_search`.
+--
+-- Behavior:
+--   - For search URLs: return tostring(url.path)
+--   - For regular file URLs: return tostring(url)
+--   - Defensive fallback: if url.path is missing/empty, fall back to tostring(url)
 ----------------------------------------------------------------------
-local function sanitize_url(u)
-  -- u is a Url
-  local s = tostring(u)
-
-  -- Fast path: non-search URLs
-  if not s:match("^search://") then
-    return u
-  end
-
-  -- Best: use Url.path (drops scheme like search://, archive://, etc.)
-  local p = tostring(u.path or "")
-  if p ~= "" then
-    return Url(p)
-  end
-
-  -- Defensive fallback: parse "...//<path>"
-  local rest = s:match("^search://.-//(.*)$")
-  if rest and rest ~= "" then
-    if rest:sub(1, 1) ~= "/" then
-      rest = "/" .. rest
+local function fs_path(url)
+  if url and url.is_search then
+    local p = url.path
+    if p then
+      local s = tostring(p)
+      if s ~= "" then
+        return s
+      end
     end
-    return Url(rest)
   end
-
-  -- If everything fails, return original
-  return u
+  return tostring(url)
 end
 
 -- Split text into "lines" (like read_line()).
@@ -205,17 +192,12 @@ end
 local function wait_for_ready_cache(job, cache_path, timeout_ms)
   local deadline = ya.time() + (timeout_ms / 1000)
   local idx = 0
-	ya.dbg("START")
-  ya.dbg({timeout=timeout_ms})
-  while ya.time() < deadline do
-    ya.dbg("CYCLE " .. tostring(idx))
-    ya.dbg({time=ya.time(),deadline=deadline})
-
+	while ya.time() < deadline do
     -- If writer is active, don't even try to read.
     if lock_is_held(cache_path) then
       ya.sleep(0.02) -- 20ms when locked
     else
-      if cache_is_fresh(job, cache_path) and cache_header_ok(cache_path) then
+      if cache_is_fresh(job, cache_path) then
         return true
       end
       ya.sleep(0.01) -- 10ms otherwise
@@ -223,8 +205,6 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
 
     idx = idx + 1
   end
-
-  ya.dbg("FINISHED")
   return false
 end
 
@@ -262,7 +242,7 @@ end
 ----------------------------------------------------------------------
 
 local function generate_cache(job, cache_path)
-	local source_path = tostring(sanitize_url(job.file.url))
+	local source_path = fs_path(job.file.url)
 	local tpl = job.args[1]
 
   if not tpl or tpl == "" then
@@ -500,12 +480,12 @@ function M:seek(job)
   end
 
   if units > SKIP_JUMP_THRESHOLD then
-  	ya.emit("peek", { cur + PEEK_JUMP_THRESHOLD + 1, only_if = sanitize_url(job.file.url) })
+  	ya.emit("peek", { cur + PEEK_JUMP_THRESHOLD + 1, only_if = job.file.url })
 	  return
 	end
 
   new_skip = math.max(0, new_skip)
-  ya.emit("peek", { new_skip, only_if = sanitize_url(job.file.url) })
+  ya.emit("peek", { new_skip, only_if = job.file.url })
 end
 
 function M:peek(job)
@@ -515,7 +495,7 @@ function M:peek(job)
 		ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
 		cache_path, why = get_cache_path(job)
 	  if not cache_path then
-	    ya.preview_widget(job, ui.Text.parse("piper: " .. tostring(why)):area(job.area))
+	    ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
 	    return
 	  end
 
@@ -525,7 +505,7 @@ function M:peek(job)
   	ya.dbg("FINISHED WAITING")
     ya.dbg({job=job.args,file=tostring(job.file.url),caller="Finished waiting"})
     if not ok then
-      ya.preview_widget(job, ui.Text.parse("piper: preload timed out (cache not produced)"):area(job.area))
+      ya.preview_widget(job, ui.Text.parse("faster-piper: preload timed out (cache not produced)"):area(job.area))
       return
     end
     local new_cache_path, why = get_cache_path(job)
@@ -560,14 +540,14 @@ function M:peek(job)
     -- If the file is small enough that PEEK_JUMP_THRESHOLD is guaranteed past EOF,
     -- then a huge skip means "jump to end".
     if total <= PEEK_JUMP_THRESHOLD and skip > PEEK_JUMP_THRESHOLD and skip ~= max_skip then
-      ya.emit("peek", { max_skip, only_if = sanitize_url(job.file.url) })
+      ya.emit("peek", { max_skip, only_if = job.file.url })
       return
     end
 
     if skip > max_skip then
       -- IMPORTANT: Don't adjust the range locally.
       -- Tell Yazi to re-run peek at the correct skip so its state stays consistent.
-      ya.emit("peek", { max_skip, only_if = sanitize_url(job.file.url) })
+      ya.emit("peek", { max_skip, only_if = job.file.url })
       return
     end
   else
