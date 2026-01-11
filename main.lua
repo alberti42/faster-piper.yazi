@@ -5,11 +5,50 @@ local M = {}
 local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
 -- Maximum time allowed for preview (in ms)
-local TIME_OUT_PREVIEW = 500
+local TIME_OUT_PREVIEW = 100
+
+----------------------------------------------------------------------
+-- Cache header layout (1-based line numbers)
+--
+-- Keep ALL header-related offsets centralized here.
+-- When adding a new header field:
+--   1) insert it into this layout
+--   2) bump HEADER.N
+--   3) update any reader functions that fetch header fields
+----------------------------------------------------------------------
+
+local HEADER = {
+  -- Total number of header lines stored at the top of the cache file.
+  N = 2,
+
+  -- Which header line contains what (1-based):
+  LINE_CMD   = 1, -- raw user-provided command template (job.args[1], unchanged)
+  LINE_NLINE = 2, -- number of *content* lines (excludes headers)
+}
+
+-- Content starts immediately after the header.
+local function content_first_line()
+  return HEADER.N + 1
+end
 
 ----------------------------------------------------------------------
 -- Utils
 ----------------------------------------------------------------------
+
+-- Sync function
+-- cx is only available in sync context (or inside a ya.sync(...) block),
+-- because it lives on the UI/main thread.
+local get_hovered = ya.sync(function()
+  local h = cx.active.current.hovered
+  if not h then
+    return nil
+  end
+
+  return {
+    url    = Url(h.url), -- clone once here (safe & explicit)
+    is_dir = h.cha and h.cha.is_dir or false,
+  }
+end)
 
 ----------------------------------------------------------------------
 -- Lazy OS-specific query builder (cached within the SAME Lua state)
@@ -37,7 +76,7 @@ local function get_queries()
       return {
         -- GNU sed: insert $L as new first line (no backup)
         sed_prepend = function(file_q)
-				  -- $L is a shell variable
+          -- $L is a shell variable
           return 'gsed -i "1i$L" -- ' .. file_q
         end,
       }
@@ -119,25 +158,25 @@ local function split_lines(s)
 end
 
 function M.format(job, lines)
-	local format = job.args.format
-	if format ~= "url" then
-		local s = table.concat(lines, ""):gsub("\r", ""):gsub("\t", string.rep(" ", rt.preview.tab_size))
-		return ui.Text.parse(s):area(job.area)
-	end
+  local format = job.args.format
+  if format ~= "url" then
+    local s = table.concat(lines, ""):gsub("\r", ""):gsub("\t", string.rep(" ", rt.preview.tab_size))
+    return ui.Text.parse(s):area(job.area)
+  end
 
-	for i = 1, #lines do
-		lines[i] = lines[i]:gsub("[\r\n]+$", "")
+  for i = 1, #lines do
+    lines[i] = lines[i]:gsub("[\r\n]+$", "")
 
-		local icon = File({
-			url = Url(lines[i]),
-			cha = Cha { mode = tonumber(lines[i]:sub(-1) == "/" and "40700" or "100644", 8) },
-		}):icon()
+    local icon = File({
+      url = Url(lines[i]),
+      cha = Cha { mode = tonumber(lines[i]:sub(-1) == "/" and "40700" or "100644", 8) },
+    }):icon()
 
-		if icon then
-			lines[i] = ui.Line { ui.Span(" " .. icon.text .. " "):style(icon.style), lines[i] }
-		end
-	end
-	return ui.Text(lines):area(job.area)
+    if icon then
+      lines[i] = ui.Line { ui.Span(" " .. icon.text .. " "):style(icon.style), lines[i] }
+    end
+  end
+  return ui.Text(lines):area(job.area)
 end
 
 -- NOTE: This freshness check only compares cache mtime vs source mtime.
@@ -192,7 +231,7 @@ end
 local function wait_for_ready_cache(job, cache_path, timeout_ms)
   local deadline = ya.time() + (timeout_ms / 1000)
   local idx = 0
-	while ya.time() < deadline do
+  while ya.time() < deadline do
     -- If writer is active, don't even try to read.
     if lock_is_held(cache_path) then
       ya.sleep(0.02) -- 20ms when locked
@@ -242,46 +281,52 @@ end
 ----------------------------------------------------------------------
 
 local function generate_cache(job, cache_path)
-	local source_path = fs_path(job.file.url)
-	local tpl = job.args[1]
-
+  local source_path = fs_path(job.file.url)
+  local tpl = job.args[1]
   if not tpl or tpl == "" then
     ya.err("faster-piper: missing generator command template (job.args[1])")
     return false
   end
 
-  -- Replace "$1" (including quotes) with a safely quoted filename
+  -- expanded command used to generate content (same as before)
   local final = tpl:gsub('"$1"', ya.quote(source_path))
 
-  local queries, queries_err = get_queries()
-  if not queries then
-    ya.err("faster-piper: " .. tostring(queries_err))
-    return false
-  end
-
   local quoted_path = ya.quote(tostring(cache_path))
-  local prepend = queries.sed_prepend(quoted_path)
+  local tmp_path    = ya.quote(tostring(cache_path) .. ".tmp")
 
-  -- 1) Generate content into file
-  -- 2) Count lines of *content* (file currently has only content)
-  -- 3) Prepend that count as first line
-  local cmd = string.format(
-    "(%s) > %s && L=$(wc -l < %s) && %s",
-    final, quoted_path, quoted_path, prepend
+  -- content -> cache_path
+  -- L = content line count
+  -- write: raw tpl (exact), L, then content
+  -- atomic replace
+  local cmd = string.format([[
+    (%s) > %s &&
+    L=$(wc -l < %s) &&
+    { printf '%%s\n' "$FP_TPL"; printf '%%s\n' "$L"; cat %s; } > %s &&
+    mv %s %s
+  ]],
+    final,
+    quoted_path,
+    quoted_path,
+    quoted_path,
+    tmp_path,
+    tmp_path,
+    quoted_path
   )
 
   local child, err = Command("sh")
     :arg({ "-c", cmd })
     :env("w", tostring(job.area.w))
     :env("h", tostring(job.area.h))
+    :env("FP_TPL", tpl)          -- EXACT user-provided command, unchanged
     :stdin(Command.NULL)
     :stdout(Command.NULL)
     :stderr(Command.PIPED)
     :spawn()
 
-	if not child then
+  if not child then
     ya.err("faster-piper: failed to spawn: " .. tostring(err))
     fs.remove("file", cache_path)
+    fs.remove("file", Url(tostring(cache_path) .. ".tmp"))
     return false
   end
 
@@ -289,55 +334,52 @@ local function generate_cache(job, cache_path)
   if not output then
     ya.err("faster-piper: wait failed: " .. tostring(werr))
     fs.remove("file", cache_path)
+    fs.remove("file", Url(tostring(cache_path) .. ".tmp"))
     return false
   end
 
-	if not output.status.success then
-    ya.err(
-      "faster-piper: command failed (code=" .. tostring(output.status.code) .. "): " ..
-      tostring(output.stderr)
-    )
+  if not output.status.success then
+    ya.err("faster-piper: command failed (code=" .. tostring(output.status.code) .. "): " .. tostring(output.stderr))
     fs.remove("file", cache_path)
+    fs.remove("file", Url(tostring(cache_path) .. ".tmp"))
     return false
   end
+
   return true
 end
 
-----------------------------------------------------------------------
--- Ensure cache exists & is fresh; regenerate if needed.
-----------------------------------------------------------------------
-
-local function ensure_cache(job, force_cache)
-  local want_cache = true
-  if not want_cache then
-    return nil, "caching-disabled"
-  end
-
+-- -------------------------------------------------------------------
+-- Ensure cache exists & is fresh; regenerate if needed (or if forced).
+-- -------------------------------------------------------------------
+local function ensure_cache(job, force)
   local cache_path, why = get_cache_path(job)
   if not cache_path then
     return nil, why
   end
 
-  -- Fast path
-  if cache_is_fresh(job, cache_path) then
+  -- If not forced and fresh -> done
+  if not force and cache_is_fresh(job, cache_path) then
     return cache_path
   end
 
-	-- Acquire lock
+  -- Acquire lock
   local lock_path = lock_path_for(cache_path)
   local ok = acquire_lock(lock_path, TIME_OUT_PREVIEW)
   if not ok then
-    -- If still stale and lock didn't clear:
     return nil, "locked-timeout"
   end
 
-  -- IMPORTANT: recheck after waiting!
-  if cache_is_fresh(job, cache_path) then
+  -- Re-check after waiting unless forced
+  if not force and cache_is_fresh(job, cache_path) then
     release_lock(lock_path)
     return cache_path
   end
 
-  -- Generate
+  -- If forced, proactively delete old cache so readers never see stale header/content
+  if force then
+    fs.remove("file", cache_path) -- best-effort
+  end
+
   local gen_ok = generate_cache(job, cache_path)
 
   release_lock(lock_path)
@@ -355,29 +397,23 @@ end
 ----------------------------------------------------------------------
 
 local function read_total_lines(cache_path)
-  local qpath = tostring(cache_path)
-	local out, err = Command("sed")
-    :arg({ "-n", "1p", qpath })
+  local spec = string.format("%dp", HEADER.LINE_NLINE)
+  local out, err = Command("sed")
+    :arg({ "-n", spec, tostring(cache_path) })
     :stdout(Command.PIPED)
     :stderr(Command.PIPED)
     :stdin(Command.NULL)
     :output()
 
-  if not out then
-    return nil, err
-  end
-  if not out.status.success then
-    return nil, out.stderr
-  end
+  if not out then return nil, err end
+  if not out.status.success then return nil, out.stderr end
 
   local n = tonumber((out.stdout or ""):match("(%d+)"))
   if not n then
-    return nil, "invalid header: " .. tostring(out.stdout)
+    return nil, "invalid line-count header: " .. tostring(out.stdout)
   end
-  -- `wc -l` counts newlines, so it may miss the last line if there's no trailing '\n'.
-  -- Add +1 so scrolling/clamping sees the real number of lines.
-  local total = n + 1
-  return total, nil
+
+  return n + 1, nil
 end
 
 ----------------------------------------------------------------------
@@ -489,30 +525,31 @@ function M:seek(job)
 end
 
 function M:peek(job)
-	local cache_path, why
-	ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
-	if is_true(job.args.rely_on_preloader) then
-		ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
-		cache_path, why = get_cache_path(job)
-	  if not cache_path then
-	    ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
-	    return
-	  end
-
-	  -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
-	  ya.dbg("STARTED WAITING")
-  	local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-  	ya.dbg("FINISHED WAITING")
-    ya.dbg({job=job.args,file=tostring(job.file.url),caller="Finished waiting"})
-    if not ok then
-      ya.preview_widget(job, ui.Text.parse("faster-piper: preload timed out (cache not produced)"):area(job.area))
+  local cache_path, why
+  ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
+  if is_true(job.args.rely_on_preloader) then
+    ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
+    cache_path, why = get_cache_path(job)
+    if not cache_path then
+      ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
       return
     end
-    local new_cache_path, why = get_cache_path(job)
-    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
-  
+
+    if not cache_is_fresh(job, cache_path) then
+	    -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
+	    ya.dbg("STARTED WAITING")
+	    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
+	    ya.dbg("FINISHED WAITING")
+	    ya.dbg({job=job.args,cache_path=tostring(cache_path),file=tostring(job.file.url),caller="Finished waiting"})
+	    if not ok then
+	      ya.preview_widget(job, ui.Text.parse("faster-piper: preload timed out (cache not produced)"):area(job.area))
+	      return
+	    end
+	    local new_cache_path, why = get_cache_path(job)
+	    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
+	  end
   else
-    cache_path, why = ensure_cache(job, false)    
+    cache_path, why = ensure_cache(job, false)
   end
 
   --------------------------------------------------------------------
@@ -559,8 +596,8 @@ function M:peek(job)
   local skip  = job.skip or 0
 
   -- content starts at line 2 (line 1 is header)
-  local start = skip + 2
-  local stop  = skip + limit + 1
+  local start = skip + content_first_line()
+  local stop  = start + limit - 1
 
   local qpath = tostring(cache_path)
   local range = string.format("%d,%dp", start, stop)
@@ -587,6 +624,27 @@ function M:peek(job)
     ya.preview_widget(job, M.format(job, lines))
   else
     ya.preview_widget(job, ui.Text.parse(out.stdout):area(job.area))
+  end
+end
+
+-- -------------------------------------------------------------------
+-- entry(): called by `run = 'plugin faster-piper ...'` keybindings
+-- -------------------------------------------------------------------
+function M:entry(job)
+  if is_true(job.args.recache) then
+    local hovered = get_hovered()
+    if not hovered then
+      return
+    end
+
+    ya.notify { title = "fasterpiper", content = "entry() called", timeout = 1.0, level = "info" }
+
+    -- Mark for forced regeneration on next peek() for this file
+    M._recache[recache_key(hovered.url)] = true
+
+    -- Trigger a preview refresh now (best-effort)
+    local skip = 0
+    ya.emit("peek", { skip, only_if = hovered.url })
   end
 end
 
