@@ -84,9 +84,8 @@ local function read_total_lines(cache_path)
     return nil, "invalid line-count header: " .. tostring(out.stdout)
   end
 
-  -- `wc -l` counts newlines, so it may miss the last line if there's no trailing '\n'.
-  -- Add +1 so scrolling/clamping sees the real number of lines.
-  return n + 1, nil
+  -- `wc -l` counts newlines ('\n')
+  return n, nil
 end
 
 local function read_cached_width(cache_path)
@@ -589,7 +588,7 @@ function M:peek(job)
   if total then
     local limit = job.area.h
     local max_skip = math.max(0, total - limit)
-    
+
     local skip = job.skip or 0
 
     -- If the file is small enough that PEEK_JUMP_THRESHOLD is guaranteed past EOF,
@@ -613,7 +612,7 @@ function M:peek(job)
   local limit = job.area.h
   local skip  = job.skip or 0
 
-  -- content starts at line 2 (line 1 is header)
+  -- content starts after HEADER.N lines of header
   local start = skip + content_first_line()
   local stop  = start + limit - 1
 
