@@ -5,8 +5,9 @@ local M = {}
 local SKIP_JUMP_THRESHOLD = 999
 local PEEK_JUMP_THRESHOLD = 99999999
 -- Maximum time allowed for preview (in ms)
-local TIME_OUT_PREVIEW = 2000
--- Maximum time for locking mechanism to avoid racing condition
+local TIME_OUT_LOCK = 5000
+local TIME_OUT_PREVIEW = 200
+-- Maximum time for stale-lock directories
 local LOCK_TTL_SEC = 60
 
 ----------------------------------------------------------------------
@@ -62,110 +63,6 @@ local function is_true(v)
     return v == "true" or v == "1" or v == "yes" or v == "on"
   end
   return true
-end
-
-----------------------------------------------------------------------
--- Read and validate a full header in ONE call.
--- Returns:
---   hdr = { cmd = <string>, nline = <number>, w = <number> }  on success
---   nil, err                                                  on failure
---
--- Notes:
--- - cmd is returned without trailing newline.
--- - nline and w are parsed as integers.
-----------------------------------------------------------------------
-local function read_cache_header(cache_path)
-  -- Read the first HEADER.N lines at once
-  local spec = string.format("1,%dp", HEADER.N)
-
-  local out, err = Command("sed")
-    :arg({ "-n", spec, tostring(cache_path) })
-    :stdout(Command.PIPED)
-    :stderr(Command.PIPED)
-    :stdin(Command.NULL)
-    :output()
-
-  if not out then
-    return nil, err
-  end
-  if not out.status.success then
-    return nil, out.stderr
-  end
-
-  local txt = out.stdout or ""
-  if txt == "" then
-    return nil, "empty cache header"
-  end
-
-  -- Split into lines (WITHOUT losing empty cmd lines)
-  -- Keep at most HEADER.N lines.
-  local lines = {}
-  local i = 0
-  for line in txt:gmatch("([^\n]*)\n") do
-    i = i + 1
-    lines[i] = line
-    if i >= HEADER.N then break end
-  end
-
-  if #lines < HEADER.N then
-    return nil, "incomplete cache header (need " .. HEADER.N .. " lines, got " .. #lines .. ")"
-  end
-
-  local cmd = lines[HEADER.LINE_CMD]
-  local nline = tonumber((lines[HEADER.LINE_NLINE] or ""):match("^%s*(%d+)%s*$"))
-  local w = tonumber((lines[HEADER.LINE_W] or ""):match("^%s*(%d+)%s*$"))
-
-  if cmd == nil then
-    return nil, "missing cmd header line"
-  end
-  if not nline then
-    return nil, "invalid line-count header: " .. tostring(lines[HEADER.LINE_NLINE])
-  end
-  if not w then
-    return nil, "invalid width header: " .. tostring(lines[HEADER.LINE_W])
-  end
-
-  return { cmd = cmd, nline = nline, w = w }, nil
-end
-
-local function read_total_lines(cache_path)
-  local spec = string.format("%dp", HEADER.LINE_NLINE)
-  local out, err = Command("sed")
-    :arg({ "-n", spec, tostring(cache_path) })
-    :stdout(Command.PIPED)
-    :stderr(Command.PIPED)
-    :stdin(Command.NULL)
-    :output()
-
-  if not out then return nil, err end
-  if not out.status.success then return nil, out.stderr end
-
-  local n = tonumber((out.stdout or ""):match("(%d+)"))
-  if not n then
-    return nil, "invalid line-count header: " .. tostring(out.stdout)
-  end
-
-  -- `wc -l` counts newlines ('\n')
-  return n, nil
-end
-
-local function read_cached_width(cache_path)
-  local spec = string.format("%dp", HEADER.LINE_W)
-  local out, err = Command("sed")
-    :arg({ "-n", spec, tostring(cache_path) })
-    :stdout(Command.PIPED)
-    :stderr(Command.PIPED)
-    :stdin(Command.NULL)
-    :output()
-
-  if not out then return nil, err end
-  if not out.status.success then return nil, out.stderr end
-
-  local w = tonumber((out.stdout or ""):match("(%d+)"))
-  if not w then
-    return nil, "invalid width header: " .. tostring(out.stdout)
-  end
-  return w, nil
 end
 
 ----------------------------------------------------------------------
@@ -245,8 +142,13 @@ function M.format(job, lines)
   return ui.Text(lines):area(job.area)
 end
 
--- NOTE: This freshness check only compares cache mtime vs source mtime.
--- Cache filename also includes w/h, so resizing naturally changes cache key.
+local read_cache_header  -- forward declaration
+
+-- Header-based freshness check:
+-- - cache mtime >= source mtime
+-- - header parses
+-- - header width matches current preview width
+-- Returns: true/false
 local function cache_is_fresh(job, cache_path)
   local c = fs.cha(cache_path)
   local s = job.file.cha
@@ -254,14 +156,13 @@ local function cache_is_fresh(job, cache_path)
     return false
   end
 
-  -- width must match current preview width
-  local cw = read_cached_width(cache_path)
-  if not cw then
+  local hdr = read_cache_header(cache_path)
+  if not hdr then
     return false
   end
-  return cw == job.area.w
-end
 
+  return hdr.w == job.area.w
+end
 
 -- Derive cache path from file_cache base + current w/h
 local function get_cache_path(job)
@@ -273,8 +174,14 @@ local function get_cache_path(job)
 end
 
 local function lock_path_for(cache_path)
-  local id = ya.id and tostring(ya.id()) or "noid"
-  return Url(string.format("%s.lock.%s", tostring(cache_path), id))
+  local app_id = ya.id and ya.id("app") or nil
+
+  local str_id = "noid"
+  if app_id and app_id.value then
+    str_id = tostring(app_id.value)
+  end
+  -- faster-piper lock system
+  return Url(string.format("%s_FP_%s.lock", tostring(cache_path), str_id))
 end
 
 local function sleep_ms(ms)
@@ -307,7 +214,6 @@ end
 -- Wait until cache is safe to read: fresh, unlocked, header readable.
 local function wait_for_ready_cache(job, cache_path, timeout_ms)
   local deadline = ya.time() + (timeout_ms / 1000)
-  local idx = 0
   while ya.time() < deadline do
     -- If writer is active, don't even try to read.
     if lock_is_held(cache_path) then
@@ -321,12 +227,9 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
       end
       ya.sleep(0.01) -- 10ms otherwise
     end
-
-    idx = idx + 1
   end
   return false
 end
-
 
 local function lock_age_seconds(lock_path)
   local c = fs.cha(lock_path)
@@ -368,6 +271,71 @@ end
 local function release_lock(lock_path)
   fs.remove("dir_all", lock_path)
 end
+
+----------------------------------------------------------------------
+-- Read and validate a full header in ONE call.
+-- Returns:
+--   hdr = { cmd = <string>, nline = <number>, w = <number> }  on success
+--   nil, err                                                  on failure
+--
+-- Notes:
+-- - cmd is returned without trailing newline.
+-- - nline and w are parsed as integers.
+----------------------------------------------------------------------
+read_cache_header = function(cache_path)
+  -- Read the first HEADER.N lines at once
+  local spec = string.format("1,%dp", HEADER.N)
+
+  local out, err = Command("sed")
+    :arg({ "-n", spec, tostring(cache_path) })
+    :stdout(Command.PIPED)
+    :stderr(Command.PIPED)
+    :stdin(Command.NULL)
+    :output()
+
+  if not out then
+    return nil, err
+  end
+  if not out.status.success then
+    return nil, out.stderr
+  end
+
+  local txt = out.stdout or ""
+  if txt == "" then
+    return nil, "empty cache header"
+  end
+
+  -- Split into lines (WITHOUT losing empty cmd lines)
+  -- Keep at most HEADER.N lines.
+  local lines = {}
+  local i = 0
+  for line in txt:gmatch("([^\n]*)\n") do
+    i = i + 1
+    lines[i] = line
+    if i >= HEADER.N then break end
+  end
+
+  if #lines < HEADER.N then
+    return nil, "incomplete cache header (need " .. HEADER.N .. " lines, got " .. #lines .. ")"
+  end
+
+  local cmd = lines[HEADER.LINE_CMD]
+  local nline = tonumber((lines[HEADER.LINE_NLINE] or ""):match("^%s*(%d+)%s*$"))
+  local w = tonumber((lines[HEADER.LINE_W] or ""):match("^%s*(%d+)%s*$"))
+
+  if cmd == nil then
+    return nil, "missing cmd header line"
+  end
+  if not nline then
+    return nil, "invalid line-count header: " .. tostring(lines[HEADER.LINE_NLINE])
+  end
+  if not w then
+    return nil, "invalid width header: " .. tostring(lines[HEADER.LINE_W])
+  end
+
+  return { cmd = cmd, nline = nline, w = w }, nil
+end
+
 
 ----------------------------------------------------------------------
 -- Cache generation
@@ -471,7 +439,7 @@ local function generate_cache(job, cache_path)
     fs.remove("file", tmp_url)
     return false
   end
-  
+
   -- 4) Sanity-check the newly written header
   local hdr, herr = read_cache_header(cache_path)
   if not hdr then
@@ -491,20 +459,19 @@ local function ensure_cache(job)
     return nil, why
   end
 
-  -- If fresh -> done
+  -- Fresh -> done
   if cache_is_fresh(job, cache_path) then
     return cache_path
   end
-  
+
   -- Acquire lock
   local lock_path = lock_path_for(cache_path)
-  local ok = acquire_lock(lock_path, TIME_OUT_PREVIEW)
-  
+  local ok = acquire_lock(lock_path, TIME_OUT_LOCK)
   if not ok then
     return nil, "locked-timeout"
   end
 
-  -- Re-check after waiting
+  -- Re-check after acquiring (someone else may have generated it)
   if cache_is_fresh(job, cache_path) then
     release_lock(lock_path)
     return cache_path
@@ -520,6 +487,7 @@ local function ensure_cache(job)
 
   return cache_path
 end
+
 
 ----------------------------------------------------------------------
 -- Yazi hooks
@@ -639,14 +607,19 @@ function M:peek(job)
     end
 
     if not cache_is_fresh(job, cache_path) then
-
-      local ensured, ewhy = ensure_cache(job)
-
-      -- Only replace cache_path if ensure_cache actually succeeded
-      if ensured then
-        cache_path = ensured
+      -- If the cache file exists, we can self-heal (resize case) by reusing cmd from header.
+      if fs.cha(cache_path) then
+        local ensured, ewhy = ensure_cache(job)
+        if ensured then
+          cache_path = ensured
+        else
+          ya.preview_widget(job,
+            ui.Text.parse("faster-piper: failed to refresh cache: " .. tostring(ewhy)):area(job.area)
+          )
+          return
+        end
       else
-        -- ensure_cache failed in preloader mode; will wait for preloader
+        -- Cache file doesn't exist (save-race): wait briefly for preloader to write it.
         local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
         if not ok then
           ya.preview_widget(job,
@@ -658,6 +631,10 @@ function M:peek(job)
     end
   else
     cache_path, why = ensure_cache(job)
+    if not cache_path then
+      ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
+      return
+    end
   end
 
   --------------------------------------------------------------------
@@ -675,29 +652,25 @@ function M:peek(job)
   --  - clamp skip by emitting a corrected peek (DON'T mutate job.skip)
   --------------------------------------------------------------------
 
-  local total, terr = read_total_lines(cache_path)
-  if total then
+  local hdr, herr = read_cache_header(cache_path)
+  if hdr then
+    local total = hdr.nline
     local limit = job.area.h
     local max_skip = math.max(0, total - limit)
 
     local skip = job.skip or 0
 
-    -- If the file is small enough that PEEK_JUMP_THRESHOLD is guaranteed past EOF,
-    -- then a huge skip means "jump to end".
     if total <= PEEK_JUMP_THRESHOLD and skip > PEEK_JUMP_THRESHOLD and skip ~= max_skip then
       ya.emit("peek", { max_skip, only_if = job.file.url })
       return
     end
 
     if skip > max_skip then
-      -- IMPORTANT: Don't adjust the range locally.
-      -- Tell Yazi to re-run peek at the correct skip so its state stays consistent.
       ya.emit("peek", { max_skip, only_if = job.file.url })
       return
     end
   else
-    -- Header missing/invalid; don't hang.
-    ya.err("faster-piper: failed to read total lines: " .. tostring(terr))
+    ya.err("faster-piper: failed to read cache header: " .. tostring(herr))
   end
 
   local limit = job.area.h
