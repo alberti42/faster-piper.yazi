@@ -123,20 +123,23 @@ generator when the preloader is expected to have done the work.
 
 ##### Notes on `--rely-on-preloader`
 
-- `--rely-on-preloader` **does not require** that you use preloaders. If you
-  don’t configure a preloader rule, use normal mode (no flag) and `peek` will
-  generate the cache on demand.
+- `--rely-on-preloader` is intended for setups where you **do configure**
+  `prepend_preloaders`. In that mode, `peek` will first assume the cache was
+  warmed by the preloader, and only falls back to self-healing in edge cases
+  (e.g. resize-triggered peeks).
+- If you **don’t** use preloaders at all, omit the flag and run in normal mode:
+  `peek` will generate the cache on demand.
 - When you *do* use preloaders, `--rely-on-preloader` is the simplest way to
   avoid keeping two command strings in sync.
-- If you do choose Option A (duplicating commands), keep them identical; mixing
-  different commands for the same matcher is undefined because of races.
+- If you choose Option A (duplicating commands), keep them **identical**;
+  mixing different commands for the same matcher is undefined because of races.
 
-#### Race safety (preloader vs. peek)
+##### Notes on race conditions (preloader vs. peek)
 
 `faster-piper` handles the race between preloading and previewing gracefully:
 
 - If both `preload` and `peek` arrive around the same time, **the generator is
-  not run twice**.
+  not run twice** (the lock ensures only one writer).
 - Which one “wins” (preloader or peek) can fluctuate depending on timing, but
   the outcome is the same: you get a valid cache and a correct preview.
 
