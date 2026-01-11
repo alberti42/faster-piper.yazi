@@ -78,28 +78,7 @@ under `plugin.prepend_preloaders`.
 
 There are two supported ways to do this:
 
-#### Option A (classic): duplicate the same command in previewers + preloaders
-
-This mirrors `piper.yazi` usage and is always valid.
-
-```toml
-[plugin]
-prepend_previewers = [
-  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
-  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
-]
-
-prepend_preloaders = [
-  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
-  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
-]
-```
-
-**Important:** the command templates must be identical. Yazi may race `preload`
-and `peek`, and whichever runs first might win. If the commands differ, the cache
-content becomes ambiguous.
-
-#### Option B (recommended): define the command only in the preloader with `--rely-on-preloader`
+#### Option A (recommended): define the command only in the preloader with `--rely-on-preloader`
 
 If you don’t want to duplicate the piping command in both places, you can make
 the previewer rule “rely on the preloader”:
@@ -124,8 +103,13 @@ prepend_preloaders = [
 ]
 ```
 
-This mode is the most responsive approach because `peek` avoids re-running the
-generator when the preloader is expected to have done the work.
+This mode is mainly about **avoiding duplication**: you keep the generator
+command in one place (the preloader rule), while the previewer rule stays a
+lightweight cache reader.
+
+Note: `faster-piper` is race-safe in both modes — if `preload` and `peek` happen
+at the same time, a lock ensures only one process writes the cache, and the
+other will reuse it once it becomes available.
 
 ##### Notes on `--rely-on-preloader`
 
@@ -137,8 +121,29 @@ generator when the preloader is expected to have done the work.
   `peek` will generate the cache on demand.
 - When you *do* use preloaders, `--rely-on-preloader` is the simplest way to
   avoid keeping two command strings in sync.
-- If you choose Option A (duplicating commands), keep them **identical**;
+- If you choose Option B (duplicating commands), keep them **identical**;
   mixing different commands for the same matcher is undefined because of races.
+
+#### Option B (classic): duplicate the same command in previewers + preloaders
+
+This mirrors `piper.yazi` usage and is always valid.
+
+```toml
+[plugin]
+prepend_previewers = [
+  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+]
+
+prepend_preloaders = [
+  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+]
+```
+
+**Important:** the command templates must be identical. Yazi may race `preload`
+and `peek`, and whichever runs first might win. If the commands differ, the cache
+content becomes ambiguous.
 
 ##### Notes on race conditions (preloader vs. peek)
 
