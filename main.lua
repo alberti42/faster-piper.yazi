@@ -19,11 +19,12 @@ local TIME_OUT_PREVIEW = 2000
 
 local HEADER = {
   -- Total number of header lines stored at the top of the cache file.
-  N = 2,
+  N = 3,
 
   -- Which header line contains what (1-based):
   LINE_CMD   = 1, -- raw user-provided command template (job.args[1], unchanged)
   LINE_NLINE = 2, -- number of *content* lines (excludes headers)
+  LINE_W     = 3, -- preview width used to generate this cache
 }
 
 -- Content starts immediately after the header.
@@ -59,6 +60,52 @@ local function is_true(v)
     return v == "true" or v == "1" or v == "yes" or v == "on"
   end
   return true
+end
+
+----------------------------------------------------------------------
+-- Read header line: total number of lines in CONTENT (excluding header).
+-- Uses `sed` (portable GNU/BSD).
+----------------------------------------------------------------------
+
+local function read_total_lines(cache_path)
+  local spec = string.format("%dp", HEADER.LINE_NLINE)
+  local out, err = Command("sed")
+    :arg({ "-n", spec, tostring(cache_path) })
+    :stdout(Command.PIPED)
+    :stderr(Command.PIPED)
+    :stdin(Command.NULL)
+    :output()
+
+  if not out then return nil, err end
+  if not out.status.success then return nil, out.stderr end
+
+  local n = tonumber((out.stdout or ""):match("(%d+)"))
+  if not n then
+    return nil, "invalid line-count header: " .. tostring(out.stdout)
+  end
+
+  -- `wc -l` counts newlines, so it may miss the last line if there's no trailing '\n'.
+  -- Add +1 so scrolling/clamping sees the real number of lines.
+  return n + 1, nil
+end
+
+local function read_cached_width(cache_path)
+  local spec = string.format("%dp", HEADER.LINE_W)
+  local out, err = Command("sed")
+    :arg({ "-n", spec, tostring(cache_path) })
+    :stdout(Command.PIPED)
+    :stderr(Command.PIPED)
+    :stdin(Command.NULL)
+    :output()
+
+  if not out then return nil, err end
+  if not out.status.success then return nil, out.stderr end
+
+  local w = tonumber((out.stdout or ""):match("(%d+)"))
+  if not w then
+    return nil, "invalid width header: " .. tostring(out.stdout)
+  end
+  return w, nil
 end
 
 ----------------------------------------------------------------------
@@ -175,8 +222,18 @@ end
 local function cache_is_fresh(job, cache_path)
   local c = fs.cha(cache_path)
   local s = job.file.cha
-  return c and c.mtime and s and s.mtime and c.mtime >= s.mtime
+  if not (c and c.mtime and s and s.mtime and c.mtime >= s.mtime) then
+    return false
+  end
+
+  -- width must match current preview width
+  local cw = read_cached_width(cache_path)
+  if not cw then
+    return false
+  end
+  return cw == job.area.w
 end
+
 
 -- Derive cache path from file_cache base + current w/h
 local function get_cache_path(job)
@@ -184,7 +241,7 @@ local function get_cache_path(job)
   if not base then
     return nil, "caching-disabled-by-yazi"
   end
-  return Url(string.format("%s_w%d_h%d", tostring(base), job.area.w, job.area.h)), nil
+  return Url(tostring(base)), nil
 end
 
 local function lock_path_for(cache_path)
@@ -293,7 +350,8 @@ local function generate_cache(job, cache_path)
   local cmd = string.format([[
     (%s) > %s &&
     L=$(wc -l < %s | tr -d '[:space:]') &&
-    { printf '%%s\n' "$FP_TPL"; printf '%%s\n' "$L"; cat %s; } > %s &&
+    W=$(printf '%%s' "$w" | tr -d '[:space:]') &&
+    { printf '%%s\n' "$FP_TPL"; printf '%%s\n' "$L"; printf '%%s\n' "$W"; cat %s; } > %s &&
     mv %s %s
   ]],
     final,
@@ -341,7 +399,7 @@ local function generate_cache(job, cache_path)
 end
 
 -- -------------------------------------------------------------------
--- Ensure cache exists & is fresh; regenerate if needed (or if forced).
+-- Ensure cache exists & is fresh; regenerate if needed
 -- -------------------------------------------------------------------
 local function ensure_cache(job)
   local cache_path, why = get_cache_path(job)
@@ -349,7 +407,7 @@ local function ensure_cache(job)
     return nil, why
   end
 
-  -- If not forced and fresh -> done
+  -- If fresh -> done
   if cache_is_fresh(job, cache_path) then
     return cache_path
   end
@@ -361,15 +419,10 @@ local function ensure_cache(job)
     return nil, "locked-timeout"
   end
 
-  -- Re-check after waiting unless forced
-  if not force and cache_is_fresh(job, cache_path) then
+  -- Re-check after waiting
+  if cache_is_fresh(job, cache_path) then
     release_lock(lock_path)
     return cache_path
-  end
-
-  -- If forced, proactively delete old cache so readers never see stale header/content
-  if force then
-    fs.remove("file", cache_path) -- best-effort
   end
 
   local gen_ok = generate_cache(job, cache_path)
@@ -381,31 +434,6 @@ local function ensure_cache(job)
   end
 
   return cache_path
-end
-
-----------------------------------------------------------------------
--- Read header line: total number of lines in CONTENT (excluding header).
--- Uses `sed` (portable GNU/BSD).
-----------------------------------------------------------------------
-
-local function read_total_lines(cache_path)
-  local spec = string.format("%dp", HEADER.LINE_NLINE)
-  local out, err = Command("sed")
-    :arg({ "-n", spec, tostring(cache_path) })
-    :stdout(Command.PIPED)
-    :stderr(Command.PIPED)
-    :stdin(Command.NULL)
-    :output()
-
-  if not out then return nil, err end
-  if not out.status.success then return nil, out.stderr end
-
-  local n = tonumber((out.stdout or ""):match("(%d+)"))
-  if not n then
-    return nil, "invalid line-count header: " .. tostring(out.stdout)
-  end
-
-  return n + 1, nil
 end
 
 ----------------------------------------------------------------------
