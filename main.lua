@@ -42,17 +42,17 @@ end
 -- Sync function
 -- cx is only available in sync context (or inside a ya.sync(...) block),
 -- because it lives on the UI/main thread.
-local get_hovered = ya.sync(function()
-  local h = cx.active.current.hovered
-  if not h then
-    return nil
-  end
+-- local get_hovered = ya.sync(function()
+--   local h = cx.active.current.hovered
+--   if not h then
+--     return nil
+--   end
 
-  return {
-    url    = Url(h.url), -- clone once here (safe & explicit)
-    is_dir = h.cha and h.cha.is_dir or false,
-  }
-end)
+--   return {
+--     url    = Url(h.url), -- clone once here (safe & explicit)
+--     is_dir = h.cha and h.cha.is_dir or false,
+--   }
+-- end)
 
 local function is_true(v)
   if v == nil then return true end  -- default true
@@ -148,20 +148,26 @@ local read_cache_header  -- forward declaration
 -- - cache mtime >= source mtime
 -- - header parses
 -- - header width matches current preview width
--- Returns: true/false
+-- Returns:
+--   ok, hdr
+-- where hdr is the parsed header if available.
 local function cache_is_fresh(job, cache_path)
   local c = fs.cha(cache_path)
   local s = job.file.cha
   if not (c and c.mtime and s and s.mtime and c.mtime >= s.mtime) then
-    return false
+    return false, nil
   end
 
   local hdr = read_cache_header(cache_path)
   if not hdr then
-    return false
+    return false, nil
   end
 
-  return hdr.w == job.area.w
+  if hdr.w ~= job.area.w then
+    return false, hdr
+  end
+
+  return true, hdr
 end
 
 -- Derive cache path from file_cache base + current w/h
@@ -184,31 +190,9 @@ local function lock_path_for(cache_path)
   return Url(string.format("%s_FP_%s.lock", tostring(cache_path), str_id))
 end
 
-local function sleep_ms(ms)
-  ya.sleep(ms / 1000)
-end
-
 local function lock_is_held(cache_path)
   local lock = lock_path_for(cache_path)
   return fs.cha(lock) ~= nil
-end
-
--- Returns true if we can parse the header line (first line) into a number.
--- This is a good "file is fully written" signal.
-local function cache_header_ok(cache_path)
-  local out = Command("sed")
-    :arg({ "-n", "1p", tostring(cache_path) })
-    :stdout(Command.PIPED)
-    :stderr(Command.PIPED)
-    :stdin(Command.NULL)
-    :output()
-
-  if not out or not out.status.success then
-    return false
-  end
-
-  local n = tonumber((out.stdout or ""):match("(%d+)"))
-  return n ~= nil
 end
 
 -- Wait until cache is safe to read: fresh, unlocked, header readable.
@@ -220,10 +204,7 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
       ya.sleep(0.02) -- 20ms when locked
     else
       if cache_is_fresh(job, cache_path) then
-        local hdr = read_cache_header(cache_path)
-        if hdr and hdr.w == job.area.w and hdr.nline then
           return true
-        end
       end
       ya.sleep(0.01) -- 10ms otherwise
     end
