@@ -195,7 +195,8 @@ local function lock_is_held(cache_path)
   return fs.cha(lock) ~= nil
 end
 
--- Wait until cache is safe to read: fresh, unlocked, header readable.
+-- Wait until cache is safe to read: unlocked + fresh.
+-- Returns: ok, hdr
 local function wait_for_ready_cache(job, cache_path, timeout_ms)
   local deadline = ya.time() + (timeout_ms / 1000)
   while ya.time() < deadline do
@@ -203,13 +204,14 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
     if lock_is_held(cache_path) then
       ya.sleep(0.02) -- 20ms when locked
     else
-      if cache_is_fresh(job, cache_path) then
-        return true
+      local ok, hdr = cache_is_fresh(job, cache_path)
+      if ok then
+        return true, hdr
       end
       ya.sleep(0.01) -- 10ms otherwise
     end
   end
-  return false
+  return false, nil
 end
 
 local function lock_age_seconds(lock_path)
@@ -606,7 +608,8 @@ function M:peek(job)
         end
       else
         -- Cache file doesn't exist (save-race): wait briefly for preloader to write it.
-        local ok2 = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
+        local ok2
+        ok2, hdr = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
         if not ok2 then
           ya.preview_widget(job,
             ui.Text.parse("faster-piper: ⏳ preview is taking longer than expected. Try selecting the file again."):area(job.area)
