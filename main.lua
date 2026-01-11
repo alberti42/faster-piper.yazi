@@ -209,39 +209,31 @@ local function wait_for_ready_cache(job, cache_path, timeout_ms)
   return false
 end
 
--- Try to acquire lock by creating a directory (atomic).
+-- Try to acquire lock by creating a directory (atomic on POSIX filesystems).
 -- Returns true if acquired, false if timed out.
 local function acquire_lock(lock_path, timeout_ms)
   timeout_ms = timeout_ms or 500
   local start = os.clock()
 
   while true do
-    -- fs.create() doesn't exist, but we can shell out:
-    -- mkdir is atomic, works across processes.
-    local out = Command("sh")
-      :arg({ "-c", "mkdir " .. ya.quote(tostring(lock_path)) })
-      :stdout(Command.NULL)
-      :stderr(Command.NULL)
-      :stdin(Command.NULL)
-      :output()
-
-    if out and out.status.success then
+    local ok, err = fs.create("dir", lock_path)  -- or "dir_all"
+    if ok then
       return true
     end
 
+    -- If it already exists, someone else holds the lock -> wait & retry.
+    -- (We don't need to pattern-match err; any failure here is treated as "not acquired".)
     if (os.clock() - start) * 1000 > timeout_ms then
       return false
     end
 
-    sleep_ms(10)
+    ya.sleep(0.01)
   end
 end
 
 local function release_lock(lock_path)
-  -- Best-effort
-  fs.remove("dir", lock_path)
+  fs.remove("dir", lock_path) -- best-effort
 end
-
 
 ----------------------------------------------------------------------
 -- Cache generation
