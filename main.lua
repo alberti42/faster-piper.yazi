@@ -44,8 +44,6 @@ local get_hovered = ya.sync(function()
     return nil
   end
 
-  ya.dbg({current=type(cx.active.current),hovered=type(cx.active.current.hovered)})
-
   return {
     url    = Url(h.url), -- clone once here (safe & explicit)
     is_dir = h.cha and h.cha.is_dir or false,
@@ -218,6 +216,7 @@ end
 local function cache_is_fresh(job, cache_path)
   local c = fs.cha(cache_path)
   local s = job.file.cha
+  ya.dbg({c=c,cmtime=c.mtime,s=s,smtime=s.smtime})
   return c and c.mtime and s and s.mtime and c.mtime >= s.mtime
 end
 
@@ -322,6 +321,9 @@ local function generate_cache(job, cache_path)
     return false
   end
 
+  ya.dbg("GENERATING CACHE")
+  ya.dbg({job=job,file=tostring(job.file.url),caller="generate_cache"})
+
   -- expanded command used to generate content (same as before)
   local final = tpl:gsub('"$1"', ya.quote(source_path))
 
@@ -385,14 +387,16 @@ end
 -- -------------------------------------------------------------------
 -- Ensure cache exists & is fresh; regenerate if needed (or if forced).
 -- -------------------------------------------------------------------
-local function ensure_cache(job, force)
+local function ensure_cache(job)
   local cache_path, why = get_cache_path(job)
   if not cache_path then
     return nil, why
   end
 
   -- If not forced and fresh -> done
-  if not force and cache_is_fresh(job, cache_path) then
+  ya.dbg("ENSURE CACHE")
+  ya.dbg({job=job,file=tostring(job.file.url),caller="ensure_cache"})
+  if cache_is_fresh(job, cache_path) then
     return cache_path
   end
 
@@ -456,7 +460,7 @@ end
 
 function M:preload(job)
   -- Preload is explicitly configured -> always warm cache
-  local cache_path = ensure_cache(job, true)
+  local cache_path = ensure_cache(job)
   return cache_path ~= nil
 end
 
@@ -559,12 +563,11 @@ function M:seek(job)
 end
 
 function M:peek(job)
-	ya.dbg({job=job})
-
+	-- ya.dbg({job=job})
   local cache_path, why
-  ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
+  -- ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
   if is_true(job.args.rely_on_preloader) then
-    ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
+    -- ya.dbg({job=job.args,file=tostring(job.file.url),caller="USE PRELOADER"})
     cache_path, why = get_cache_path(job)
     if not cache_path then
       ya.preview_widget(job, ui.Text.parse("faster-piper: " .. tostring(why)):area(job.area))
@@ -573,16 +576,16 @@ function M:peek(job)
 
     if not cache_is_fresh(job, cache_path) then
 	    -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
-	    ya.dbg("STARTED WAITING")
+	    -- ya.dbg("STARTED WAITING")
 	    local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
-	    ya.dbg("FINISHED WAITING")
-	    ya.dbg({job=job.args,cache_path=tostring(cache_path),file=tostring(job.file.url),caller="Finished waiting"})
+	    -- ya.dbg("FINISHED WAITING")
+	    -- ya.dbg({job=job.args,cache_path=tostring(cache_path),file=tostring(job.file.url),caller="Finished waiting"})
 	    if not ok then
 	      ya.preview_widget(job, ui.Text.parse("faster-piper: preload timed out (cache not produced)"):area(job.area))
 	      return
 	    end
 	    local new_cache_path, why = get_cache_path(job)
-	    ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
+	    -- ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
 	  end
   else
     cache_path, why = ensure_cache(job, false)
@@ -667,29 +670,7 @@ end
 -- entry(): called by `run = 'plugin faster-piper ...'` keybindings
 -- -------------------------------------------------------------------
 function M:entry(job)
-  if not is_true(job.args.recache) then
-    return
-  end
-
-  local hovered = get_hovered()
-  if not hovered then
-    return
-  end
-  ya.dbg("HERE")
-  ya.dbg({url=tostring(hovered.url)})
-  -- Build a File object for ya.file_cache
-  ya.dbg("THERE")
-  local ok, perr = purge_all_cache_variants(hovered.url)
-  ya.dbg("ALSO HERE")
-  if not ok then
-    ya.notify { title = "faster-piper", content = "cache purging failed: " .. tostring(perr), timeout = 2.0, level = "error" }
-    return
-  end
-
-  -- Force the real previewer to rebuild cache using its own recipe (job.args[1]).
-  ya.dbg("CALLING")
-  ya.emit("peek", { 0, only_if = hovered.url })
-  ya.dbg("CALLED")
+  return
 end
 
 
