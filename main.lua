@@ -480,9 +480,9 @@ function M:seek(job)
   end
 
   if units > SKIP_JUMP_THRESHOLD then
-  	ya.emit("peek", { cur + PEEK_JUMP_THRESHOLD + 1, only_if = job.file.url })
-	  return
-	end
+    ya.emit("peek", { cur + PEEK_JUMP_THRESHOLD + 1, only_if = job.file.url })
+    return
+  end
 
   new_skip = math.max(0, new_skip)
   ya.emit("peek", { new_skip, only_if = job.file.url })
@@ -511,9 +511,9 @@ function M:peek(job)
     local new_cache_path, why = get_cache_path(job)
     ya.dbg({job=job.args,file=tostring(job.file.url),newcache=tostring(new_cache_path),cache=tostring(cache_path),caller="Success"})
   
-	else
-		cache_path, why = ensure_cache(job, false)		
-	end
+  else
+    cache_path, why = ensure_cache(job, false)    
+  end
 
   --------------------------------------------------------------------
   -- If caching disabled => run generator directly (old behavior)
