@@ -44,6 +44,8 @@ local get_hovered = ya.sync(function()
     return nil
   end
 
+  ya.dbg({current=type(cx.active.current),hovered=type(cx.active.current.hovered)})
+
   return {
     url    = Url(h.url), -- clone once here (safe & explicit)
     is_dir = h.cha and h.cha.is_dir or false,
@@ -177,6 +179,38 @@ function M.format(job, lines)
     end
   end
   return ui.Text(lines):area(job.area)
+end
+
+-- Remove all cached variants for a file (all w/h), plus tmp + lock.
+local function purge_all_cache_variants(file)
+
+  -- local base = ya.file_cache({ file = file, skip = 0 })
+  -- if not base then
+  --   return false, "caching-disabled-by-yazi"
+  -- end
+
+  -- local prefix = tostring(base) .. "_w*_h*"
+  -- local cmd = string.format([[
+  --   rm -f %s %s.tmp 2>/dev/null || true
+  --   rm -rf %s.lock 2>/dev/null || true
+  -- ]],
+  --   ya.quote(prefix),
+  --   ya.quote(prefix),
+  --   ya.quote(prefix)
+  -- )
+
+  -- local out, err = Command("sh")
+  --   :arg({ "-c", cmd })
+  --   :stdin(Command.NULL)
+  --   :stdout(Command.NULL)
+  --   :stderr(Command.PIPED)
+  --   :output()
+
+  -- if not out then
+  --   return false, err
+  -- end
+  -- -- rm returns 0 even if nothing matched (because of `|| true`), so just treat as ok.
+  return true
 end
 
 -- NOTE: This freshness check only compares cache mtime vs source mtime.
@@ -525,6 +559,8 @@ function M:seek(job)
 end
 
 function M:peek(job)
+	ya.dbg({job=job})
+
   local cache_path, why
   ya.dbg({status=is_true(job.args.rely_on_preloader),job=job.args,file=tostring(job.file.url),caller="PEEK"})
   if is_true(job.args.rely_on_preloader) then
@@ -631,21 +667,30 @@ end
 -- entry(): called by `run = 'plugin faster-piper ...'` keybindings
 -- -------------------------------------------------------------------
 function M:entry(job)
-  if is_true(job.args.recache) then
-    local hovered = get_hovered()
-    if not hovered then
-      return
-    end
-
-    ya.notify { title = "fasterpiper", content = "entry() called", timeout = 1.0, level = "info" }
-
-    -- Mark for forced regeneration on next peek() for this file
-    M._recache[recache_key(hovered.url)] = true
-
-    -- Trigger a preview refresh now (best-effort)
-    local skip = 0
-    ya.emit("peek", { skip, only_if = hovered.url })
+  if not is_true(job.args.recache) then
+    return
   end
+
+  local hovered = get_hovered()
+  if not hovered then
+    return
+  end
+  ya.dbg("HERE")
+  ya.dbg({url=tostring(hovered.url)})
+  -- Build a File object for ya.file_cache
+  ya.dbg("THERE")
+  local ok, perr = purge_all_cache_variants(hovered.url)
+  ya.dbg("ALSO HERE")
+  if not ok then
+    ya.notify { title = "faster-piper", content = "cache purging failed: " .. tostring(perr), timeout = 2.0, level = "error" }
+    return
+  end
+
+  -- Force the real previewer to rebuild cache using its own recipe (job.args[1]).
+  ya.dbg("CALLING")
+  ya.emit("peek", { 0, only_if = hovered.url })
+  ya.dbg("CALLED")
 end
+
 
 return M
