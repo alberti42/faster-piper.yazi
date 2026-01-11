@@ -8,7 +8,7 @@ and efficient scrolling for large outputs.
 
 ## Motivation
 
-The original [`piper.yazi`](https://github.com/yazi-rs/plugins/tree/main/piper)
+The original [`piper.yazi`](https://github.com/yazi-rs/plugins/tree/main/piper.yazi)
 is a simple and elegant previewer that executes a shell command on each preview.
 
 `faster-piper` started as an experiment to explore whether:
@@ -191,7 +191,7 @@ All credit for the original idea and initial implementation goes to the
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 It is inspired by `piper.yazi`, which is also MIT-licensed.
 See the LICENSE file for details.
