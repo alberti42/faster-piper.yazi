@@ -327,25 +327,136 @@ end
 -- Header line: total number of CONTENT lines (excluding header itself).
 ----------------------------------------------------------------------
 
+----------------------------------------------------------------------
+-- Read and validate a full header in ONE call.
+-- Returns:
+--   hdr = { cmd = <string>, nline = <number>, w = <number> }  on success
+--   nil, err                                                  on failure
+--
+-- Notes:
+-- - cmd is returned without trailing newline.
+-- - nline and w are parsed as integers.
+----------------------------------------------------------------------
+local function read_cache_header(cache_path)
+  -- Read the first HEADER.N lines at once
+  local spec = string.format("1,%dp", HEADER.N)
+
+  local out, err = Command("sed")
+    :arg({ "-n", spec, tostring(cache_path) })
+    :stdout(Command.PIPED)
+    :stderr(Command.PIPED)
+    :stdin(Command.NULL)
+    :output()
+
+  if not out then
+    return nil, err
+  end
+  if not out.status.success then
+    return nil, out.stderr
+  end
+
+  local txt = out.stdout or ""
+  if txt == "" then
+    return nil, "empty cache header"
+  end
+
+  -- Split into lines (WITHOUT losing empty cmd lines)
+  -- Keep at most HEADER.N lines.
+  local lines = {}
+  local i = 0
+  for line in txt:gmatch("([^\n]*)\n") do
+    i = i + 1
+    lines[i] = line
+    if i >= HEADER.N then break end
+  end
+
+  if #lines < HEADER.N then
+    return nil, "incomplete cache header (need " .. HEADER.N .. " lines, got " .. #lines .. ")"
+  end
+
+  local cmd = lines[HEADER.LINE_CMD]
+  local nline = tonumber((lines[HEADER.LINE_NLINE] or ""):match("^%s*(%d+)%s*$"))
+  local w = tonumber((lines[HEADER.LINE_W] or ""):match("^%s*(%d+)%s*$"))
+
+  if cmd == nil then
+    return nil, "missing cmd header line"
+  end
+  if not nline then
+    return nil, "invalid line-count header: " .. tostring(lines[HEADER.LINE_NLINE])
+  end
+  if not w then
+    return nil, "invalid width header: " .. tostring(lines[HEADER.LINE_W])
+  end
+
+  return { cmd = cmd, nline = nline, w = w }, nil
+end
+
+
+----------------------------------------------------------------------
+-- Cache generation (rewritten)
+--
+-- Behavior:
+-- - If job.args[1] is present: use it as recipe.
+-- - Else: if cache exists and has valid header: reuse cached recipe (LINE_CMD).
+-- - Else: fail (no recipe available).
+--
+-- Always writes a 3-line header:
+--   1) command template (exact string we use)
+--   2) number of content lines (wc -l, trimmed)
+--   3) width used (w, trimmed)
+----------------------------------------------------------------------
 local function generate_cache(job, cache_path)
   local source_path = fs_path(job.file.url)
-  local tpl = job.args[1]
+
+  -- 1) Decide template: job.args[1] or cached header
+  local tpl = job.args and job.args[1]
+  if tpl == "" then tpl = nil end
+  
+  ya.dbg("GENERATING")
+  ya.dbg({cache=tostring(cache_path)})
+
+  if not tpl then
+    ya.dbg("NOT TPL")
+    local cha = fs.cha(cache_path)
+    ya.dbg({cha=cha})
+    if cha then
+      ya.dbg("READING CACHE HEADER")
+      local hdr, herr = read_cache_header(cache_path)
+      ya.dbg("READ CACHE HEADER")
+      if hdr and hdr.cmd and hdr.cmd ~= "" then
+        tpl = hdr.cmd
+        ya.dbg({tpl=tpl})
+      else
+        -- header invalid -> cannot recover recipe
+        ya.err("faster-piper: cache header invalid; cannot reuse recipe: " .. tostring(herr))
+      end
+    end
+  end
+
   if not tpl or tpl == "" then
-    ya.err("faster-piper: missing generator command template (job.args[1])")
+    ya.err("faster-piper: missing generator command template (job.args[1]) and no usable cached header")
     return false
   end
 
-  -- expanded command used to generate content (same as before)
+  ya.dbg({tpl=tpl})
+
+  -- Guard: template must be single-line for env passing + header layout
+  if tpl:find("\n", 1, true) then
+    ya.err("faster-piper: command template contains newline; unsupported")
+    return false
+  end
+
+  -- 2) Expand "$1" safely for external tools
   local final = tpl:gsub('"$1"', ya.quote(source_path))
 
   local quoted_path = ya.quote(tostring(cache_path))
-  local tmp_path    = ya.quote(tostring(cache_path) .. ".tmp")
+  local tmp_url = Url(tostring(cache_path) .. ".tmp")
+  local tmp_path = ya.quote(tostring(tmp_url))
 
-  ya.dbg({cache=tostring(cache_path)})
-  -- content -> cache_path
-  -- L = content line count
-  -- write: raw tpl (exact), L, then content
-  -- atomic replace
+  -- 3) Generate content into cache_path (temporary), then build header+content into tmp, then mv
+  --
+  -- - We trim whitespace from wc output to avoid leading spaces.
+  -- - We also trim $w to be safe.
   local cmd = string.format([[
     (%s) > %s &&
     L=$(wc -l < %s | tr -d '[:space:]') &&
@@ -362,11 +473,13 @@ local function generate_cache(job, cache_path)
     quoted_path
   )
 
+  ya.dbg({cmd=cmd})
+
   local child, err = Command("sh")
     :arg({ "-c", cmd })
     :env("w", tostring(job.area.w))
     :env("h", tostring(job.area.h))
-    :env("FP_TPL", tpl)          -- EXACT user-provided command, unchanged
+    :env("FP_TPL", tpl) -- EXACT template string we used
     :stdin(Command.NULL)
     :stdout(Command.NULL)
     :stderr(Command.PIPED)
@@ -375,7 +488,7 @@ local function generate_cache(job, cache_path)
   if not child then
     ya.err("faster-piper: failed to spawn: " .. tostring(err))
     fs.remove("file", cache_path)
-    fs.remove("file", Url(tostring(cache_path) .. ".tmp"))
+    fs.remove("file", tmp_url)
     return false
   end
 
@@ -383,17 +496,25 @@ local function generate_cache(job, cache_path)
   if not output then
     ya.err("faster-piper: wait failed: " .. tostring(werr))
     fs.remove("file", cache_path)
-    fs.remove("file", Url(tostring(cache_path) .. ".tmp"))
+    fs.remove("file", tmp_url)
     return false
   end
 
   if not output.status.success then
     ya.err("faster-piper: command failed (code=" .. tostring(output.status.code) .. "): " .. tostring(output.stderr))
     fs.remove("file", cache_path)
-    fs.remove("file", Url(tostring(cache_path) .. ".tmp"))
+    fs.remove("file", tmp_url)
     return false
   end
-
+  ya.dbg("READING CACHE HEADER")
+  -- 4) Sanity-check the newly written header (optional but useful)
+  local hdr, herr = read_cache_header(cache_path)
+  if not hdr then
+    ya.err("faster-piper: wrote cache but header sanity-check failed: " .. tostring(herr))
+    fs.remove("file", cache_path)
+    return false
+  end
+  ya.dbg("DONE")
   return true
 end
 
@@ -406,14 +527,17 @@ local function ensure_cache(job)
     return nil, why
   end
 
+  ya.dbg("ENSURE_CACHE")
   -- If fresh -> done
   if cache_is_fresh(job, cache_path) then
     return cache_path
   end
+  ya.dbg("NO VALID CACHE")
 
   -- Acquire lock
   local lock_path = lock_path_for(cache_path)
   local ok = acquire_lock(lock_path, TIME_OUT_PREVIEW)
+  ya.dbg("LOCK ACQUIRED")
   if not ok then
     return nil, "locked-timeout"
   end
@@ -553,8 +677,11 @@ function M:peek(job)
     end
 
     if not cache_is_fresh(job, cache_path) then
+      -- Force generation of cache -- locking mechanism prevent racing conditions
+      ya.dbg("FORCING")
+      cache_path, why = ensure_cache(job)
       -- If not ready, wait up to TIME_OUT_PREVIEW for preloader to produce fresh cache
-      local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
+      -- local ok = wait_for_ready_cache(job, cache_path, TIME_OUT_PREVIEW)
       if not ok then
         ya.preview_widget(
           job,
@@ -562,11 +689,9 @@ function M:peek(job)
         )
         return
       end
-
-      local new_cache_path, why = get_cache_path(job)
     end
   else
-    cache_path, why = ensure_cache(job, false)
+    cache_path, why = ensure_cache(job)
   end
 
   --------------------------------------------------------------------
