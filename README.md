@@ -72,7 +72,7 @@ run = 'faster-piper --format=url -- tar tf "$1"'
 `faster-piper` works **without** preloading: the first `peek` will generate the
 cache on demand.
 
-If you want previews to appear *instantaneously* when you move the cursor (i.e.
+If you want previews to appear _instantaneously_ when you move the cursor (i.e.
 the cache is already warm by the time `peek` runs), configure a matching rule
 under `plugin.prepend_preloaders`.
 
@@ -93,13 +93,15 @@ Example:
 ```toml
 [plugin]
 prepend_previewers = [
-  { url = "*.md",   run = 'faster-piper --rely-on-preloader' },
-  { url = "*.tar*", run = 'faster-piper --rely-on-preloader --format=url' },
+  { url = "*.md",     run = 'faster-piper --rely-on-preloader' },
+  { url = "*.tar*",   run = 'faster-piper --rely-on-preloader --format=url' },
+  { url = "*.txt.gz", run = 'faster-piper --rely-on-preloader' },
 ]
 
 prepend_preloaders = [
-  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
-  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+  { url = "*.md",     run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*",   run = 'faster-piper -- tar tf "$1"' },
+  { url = "*.txt.gz", run = 'faster-piper -- gzip -dc "$1"' },
 ]
 ```
 
@@ -119,7 +121,7 @@ other will reuse it once it becomes available.
   (e.g. resize-triggered peeks).
 - If you **don’t** use preloaders at all, omit the flag and run in normal mode:
   `peek` will generate the cache on demand.
-- When you *do* use preloaders, `--rely-on-preloader` is the simplest way to
+- When you _do_ use preloaders, `--rely-on-preloader` is the simplest way to
   avoid keeping two command strings in sync.
 - If you choose Option B (duplicating commands), keep them **identical**;
   mixing different commands for the same matcher is undefined because of races.
@@ -131,13 +133,15 @@ This mirrors `piper.yazi` usage and is always valid.
 ```toml
 [plugin]
 prepend_previewers = [
-  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
-  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+  { url = "*.md",     run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*",   run = 'faster-piper --format=url -- tar tf "$1"' },
+  { url = "*.txt.gz", run = 'faster-piper -- gzip -dc "$1"' },
 ]
 
 prepend_preloaders = [
-  { url = "*.md",   run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
-  { url = "*.tar*", run = 'faster-piper --format=url -- tar tf "$1"' },
+  { url = "*.md",     run = 'faster-piper -- CLICOLOR_FORCE=1 glow -w=$w -s=dracula -- "$1"' },
+  { url = "*.tar*",   run = 'faster-piper -- tar tf "$1"' },
+  { url = "*.txt.gz", run = 'faster-piper -- gzip -dc "$1"' },
 ]
 ```
 
@@ -158,7 +162,7 @@ content becomes ambiguous.
 
 `faster-piper` supports normal incremental scrolling via `seek +/-N` (in lines).
 
-In addition, it implements a *jump heuristic* for very large seek steps:
+In addition, it implements a _jump heuristic_ for very large seek steps:
 
 - If a single `seek` step is **less than -999**, it jumps to the **top**.
 - If a single `seek` step is **greater than +999**, it jumps to the **bottom**.
