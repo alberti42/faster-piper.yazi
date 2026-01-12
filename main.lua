@@ -13,7 +13,7 @@ local LOCK_TTL_SEC = 60
 ----------------------------------------------------------------------
 -- Cache header layout (1-based line numbers)
 --
--- Keep ALL header-related offsets centralized here.
+-- We keep ALL header-related offsets centralized here.
 -- When adding a new header field:
 --   1) insert it into this layout
 --   2) bump HEADER.N
@@ -38,21 +38,6 @@ end
 ----------------------------------------------------------------------
 -- Utils
 ----------------------------------------------------------------------
-
--- Sync function
--- cx is only available in sync context (or inside a ya.sync(...) block),
--- because it lives on the UI/main thread.
--- local get_hovered = ya.sync(function()
---   local h = cx.active.current.hovered
---   if not h then
---     return nil
---   end
-
---   return {
---     url    = Url(h.url), -- clone once here (safe & explicit)
---     is_dir = h.cha and h.cha.is_dir or false,
---   }
--- end)
 
 --- Parse a "truthy/falsey" value into a boolean, with an explicit default.
 ---
